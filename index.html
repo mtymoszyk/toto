@@ -1,0 +1,1875 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>todo — getting things done</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { -webkit-font-smoothing: antialiased; }
+    body { min-height: 100vh; transition: background 0.25s; font-family: 'Inter', system-ui, -apple-system, sans-serif; }
+    button, input, textarea { font-family: inherit; }
+    .task-columns { column-gap: 16px; }
+    .task-columns > li { break-inside: avoid; -webkit-column-break-inside: avoid; }
+    @media (min-width: 900px)  { .task-columns { column-count: 2; } }
+    @media (min-width: 1440px) { .task-columns { column-count: 3; } }
+    .card-toolbar { opacity: 0; pointer-events: none; transition: opacity 0.15s; }
+    li:hover .card-toolbar, li:focus-within .card-toolbar { opacity: 1; pointer-events: auto; }
+    @media (hover: none) { .card-toolbar { position: static !important; opacity: 1; pointer-events: auto; background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; } }
+    .icon-btn { background: none; border: none; cursor: pointer; padding: 4px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; transition: background 0.12s, color 0.12s; }
+    .ghost-btn { background: none; cursor: pointer; border-radius: 8px; font-size: 12.5px; font-weight: 500; transition: all 0.15s; }
+    button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid #5E6AD2; outline-offset: 1px; }
+    @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+
+/* ============================================================
+   todo — Getting Things Done. Single file, localStorage database.
+   Data model (backward-compatible with the previous todo_v1 format):
+   { id, text, tags[], people[], done, createdAt, modifiedAt, doneAt,
+     note, snoozedUntil, status, project, repeatDays }
+   status ∈ inbox | next | waiting | someday   (active tasks only)
+   snoozedUntil = the GTD tickler file
+   people[] = who this task involves (@name in the capture bar)
+   ============================================================ */
+
+/* Muted, low-saturation tag palette — recognizable, never loud */
+const TAG_COLORS = ["#64748B", "#6B8F71", "#8B7355", "#7C6E8F", "#5F8296", "#8F8A6B", "#946B6B", "#5E7D7D"];
+const tagColor = tag => TAG_COLORS[Math.abs([...tag.toLowerCase()].reduce((a, c) => a + c.charCodeAt(0), 0)) % TAG_COLORS.length];
+/* Tags keep exactly the case they were typed with ("QA" stays "QA").
+   All matching, deduping and searching is case-insensitive. */
+const normalizeTag = t => String(t).trim();
+const sameTag = (a, b) => a.toLowerCase() === b.toLowerCase();
+const hasTag = (item, tag) => item.tags.some(t => sameTag(t, tag));
+const toggleIn = (list, tag) => list.some(x => sameTag(x, tag)) ? list.filter(x => !sameTag(x, tag)) : [...list, tag];
+const dedupeTagsCI = tags => { const seen = new Map(); (tags || []).forEach(t => { const k = String(t).trim(); if (k && !seen.has(k.toLowerCase())) seen.set(k.toLowerCase(), k); }); return [...seen.values()]; };
+/* People (@name) reuse the same case-insensitive rules as tags but live in
+   their own list so they never mix with #tags or areas. */
+const hasPerson = (item, p) => (item.people || []).some(x => sameTag(x, p));
+const PERSON_COLORS = ["#4F7CAC", "#7A6C9E", "#5B8A72", "#A0705C", "#6D8AA8", "#8A6F8E"];
+const personColor = p => PERSON_COLORS[Math.abs([...p.toLowerCase()].reduce((a, c) => a + c.charCodeAt(0), 0)) % PERSON_COLORS.length];
+
+const STATUSES = {
+  inbox:   { label: "Inbox",   hint: "unprocessed" },
+  next:    { label: "Next",    hint: "next actions" },
+  waiting: { label: "Waiting", hint: "waiting on someone" },
+  someday: { label: "Someday", hint: "someday / maybe" }
+};
+const STATUS_KEYS = Object.keys(STATUSES);
+const validStatus = s => STATUS_KEYS.includes(s) ? s : null;
+
+/* Input parsing:
+   #tag  +Project  @person            — single-word
+   #"multi word"  +"Multi Word"  @"Jane Doe"  — quoted (single quotes work too)
+   Quoted forms are consumed first so their content can contain spaces.
+   Routing shortcuts (consumed, never stored as tags):
+     #w8 / #wait / #waiting → Waiting     #next → Next
+     #someday / #sd → Someday             #inbox → Inbox
+   Snooze shortcut:  ^6  ^6d  ^2w  ^1m  ^tomorrow  ^2026-10-01
+   Email addresses are left alone: the "@" must start a token. */
+const ROUTE_TOKENS = { w8: "waiting", wait: "waiting", waiting: "waiting", next: "next", someday: "someday", sd: "someday", inbox: "inbox" };
+const parseSnoozeToken = raw => {
+  const v = String(raw).trim().toLowerCase();
+  if (!v) return null;
+  if (v === "tomorrow" || v === "tmrw" || v === "tmr") return snoozeUntil(1);
+  const rel = v.match(/^(\d{1,3})\s*(d|w|m)?$/);
+  if (rel) { const n = +rel[1]; const mult = rel[2] === "w" ? 7 : rel[2] === "m" ? 30 : 1; return n > 0 ? snoozeUntil(n * mult) : null; }
+  const abs = v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (abs) { const d = new Date(+abs[1], +abs[2] - 1, +abs[3]); d.setHours(0, 0, 0, 0); return isNaN(d) || d.getTime() <= Date.now() ? null : d.getTime(); }
+  return null;
+};
+const parseInput = text => {
+  const tags = [], people = [];
+  let project = null, status = null, snoozedUntil = null;
+  let clean = String(text);
+  clean = clean.replace(/(^|\s)#"([^"]+)"|(^|\s)#'([^']+)'/g, (m, s1, a, s2, b) => { const v = (a || b).trim(); if (v) tags.push(v); return s1 || s2 || ""; });
+  clean = clean.replace(/(^|\s)\+"([^"]+)"|(^|\s)\+'([^']+)'/g, (m, s1, a, s2, b) => { const v = (a || b).trim(); if (v && !project) project = v; return s1 || s2 || ""; });
+  clean = clean.replace(/(^|\s)@"([^"]+)"|(^|\s)@'([^']+)'/g, (m, s1, a, s2, b) => { const v = (a || b).trim(); if (v) people.push(v); return s1 || s2 || ""; });
+  clean = clean.replace(/(^|\s)#([\p{L}\p{N}_-]+)/gu, (m, s, a) => {
+    const route = ROUTE_TOKENS[a.toLowerCase()];
+    if (route) { if (!status) status = route; } else tags.push(a);
+    return s || "";
+  });
+  clean = clean.replace(/(^|\s)\+([\p{L}\p{N}_-]+)/gu, (m, s, a) => { if (!project) project = a; return s || ""; });
+  clean = clean.replace(/(^|\s)@([\p{L}\p{N}_.-]+)/gu, (m, s, a) => { const v = a.replace(/[.-]+$/, ""); if (v) people.push(v); return s || ""; });
+  clean = clean.replace(/(^|\s)\^(\S+)/g, (m, s, a) => { const ts = parseSnoozeToken(a); if (ts) { snoozedUntil = ts; return s || ""; } return m; });
+  return { clean: clean.replace(/\s+/g, " ").trim(), tags, project, people: dedupeTagsCI(people), status, snoozedUntil };
+};
+
+const fmtDate = ts => {
+  if (!ts) return null;
+  const d = new Date(ts);
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+const fmtDay = ts => {
+  if (!ts) return null;
+  const d = new Date(ts);
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+};
+const isToday = ts => {
+  if (!ts) return false;
+  const d = new Date(ts), n = new Date();
+  return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
+};
+const isThisWeek = ts => {
+  if (!ts) return false;
+  const d = new Date(ts), n = new Date();
+  const sow = new Date(n); sow.setDate(n.getDate() - n.getDay() + (n.getDay() === 0 ? -6 : 1)); sow.setHours(0,0,0,0);
+  return d >= sow;
+};
+const dayStart = ts => { const d = new Date(ts); d.setHours(0, 0, 0, 0); return d.getTime(); };
+/* Snooze is calendar-day based: a task hidden "until day X" surfaces at the
+   START of day X. Legacy hour-based timestamps (old +24h logic) therefore
+   surface on their day, not at their recorded hour. */
+const isSnoozed = i => !!(i.snoozedUntil && dayStart(i.snoozedUntil) > Date.now());
+const daysAgo = ts => Math.floor((Date.now() - ts) / 864e5);
+
+const themes = {
+  light: {
+    bg: "#F7F7F5", card: "#FFFFFF", cardDone: "#FBFBFA", text: "#1D1D1F", muted: "#6E6E76",
+    faint: "#A5A5AC", timestamp: "#B8B8BE", border: "#E8E8E4", borderStrong: "#D8D8D2",
+    inputBg: "#FFFFFF", accent: "#5E6AD2", accentText: "#FFFFFF", hover: "#F2F2EF",
+    green: "#4C9A73", danger: "#C25454", dangerBg: "#FBF0F0",
+    warnBg: "#FBF4E3", warnText: "#8A6210", warnBorder: "#EAD9AC",
+    shadow: "0 1px 3px rgba(20,20,25,0.05)", shadowHover: "0 4px 14px rgba(20,20,25,0.07)"
+  },
+  dark: {
+    bg: "#121215", card: "#1B1B1F", cardDone: "#18181C", text: "#E9E9EB", muted: "#98989F",
+    faint: "#616168", timestamp: "#4E4E55", border: "#2A2A30", borderStrong: "#38383F",
+    inputBg: "#1B1B1F", accent: "#8B93E8", accentText: "#15151A", hover: "#232329",
+    green: "#5FAE87", danger: "#D97C7C", dangerBg: "#2A1B1B",
+    warnBg: "#2A2415", warnText: "#D9B45C", warnBorder: "#4A3E1E",
+    shadow: "0 1px 3px rgba(0,0,0,0.3)", shadowHover: "0 4px 14px rgba(0,0,0,0.4)"
+  }
+};
+
+/* ---- storage layer ----
+   Probes localStorage once. In sandboxed previews / embedded views /
+   browsers with site data blocked, any access throws — fall back to an
+   in-memory store so the app still works, and surface a clear warning. */
+const store = (() => {
+  const probe = () => {
+    const k = "__todo_probe__";
+    window.localStorage.setItem(k, "1");
+    window.localStorage.removeItem(k);
+  };
+  const normal = {
+    getItem: k => window.localStorage.getItem(k),
+    setItem: (k, v) => window.localStorage.setItem(k, v),
+    removeItem: k => window.localStorage.removeItem(k),
+    volatile: false, error: null, readable: true, retest: () => true
+  };
+  try { probe(); return normal; }
+  catch (e) {
+    /* Storage is broken. Two flavours:
+       - SecurityError: fully blocked, reads fail too.
+       - QuotaExceededError: the pool is FULL — reads still work, so existing
+         data is intact; buffer writes in memory and flush once space frees up. */
+    let readable = false;
+    try { window.localStorage.getItem("__todo_probe__"); readable = true; } catch (_) {}
+    const mem = {};
+    const s = {
+      getItem: k => {
+        if (k in mem) return mem[k];
+        if (readable) { try { return window.localStorage.getItem(k); } catch (_) {} }
+        return null;
+      },
+      setItem: (k, v) => {
+        v = String(v);
+        /* opportunistic: try the real write first — if space was freed, use it */
+        try { window.localStorage.setItem(k, v); delete mem[k]; return; } catch (_) {}
+        mem[k] = v;
+      },
+      removeItem: k => {
+        delete mem[k];
+        try { window.localStorage.removeItem(k); } catch (_) {}
+      },
+      volatile: true, readable,
+      error: (e && e.name ? e.name : "Error") + (e && e.message ? ": " + e.message : ""),
+      /* Re-probe; on success flush buffered writes and switch to persistent mode */
+      retest: () => {
+        try {
+          probe();
+          for (const k of Object.keys(mem)) { window.localStorage.setItem(k, mem[k]); delete mem[k]; }
+          s.volatile = false; s.error = null;
+          s.getItem = normal.getItem; s.setItem = normal.setItem; s.removeItem = normal.removeItem;
+          return true;
+        } catch (e2) {
+          s.error = (e2 && e2.name ? e2.name : "Error") + (e2 && e2.message ? ": " + e2.message : "");
+          return false;
+        }
+      }
+    };
+    return s;
+  }
+})();
+const isQuotaIssue = () => !!(store.error && /quota/i.test(store.error));
+/* List what occupies the shared file:// storage pool (works while reads are allowed) */
+const listStorageEntries = () => {
+  const out = [];
+  try {
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      let v = "";
+      try { v = window.localStorage.getItem(k) || ""; } catch (e) {}
+      out.push({ key: k, bytes: (k.length + v.length) * 2 }); /* UTF-16 ≈ 2 bytes/char */
+    }
+  } catch (e) {}
+  return out.sort((a, b) => b.bytes - a.bytes);
+};
+const fmtBytes = b => b >= 1048576 ? (b / 1048576).toFixed(2) + " MB" : b >= 1024 ? (b / 1024).toFixed(1) + " KB" : b + " B";
+/* diagnostic string shown in the warning banner so the cause is identifiable */
+const storageDiag = () => {
+  let proto = "unknown";
+  try { proto = window.location.protocol; } catch (e) {}
+  let framed = "top window";
+  try { framed = window.top === window.self ? "top window" : "inside an iframe"; } catch (e) { framed = "inside a cross-origin iframe"; }
+  return proto + " · " + framed + (store.error ? " · " + store.error : "");
+};
+
+/* ---- persistence keys (todo_v1 kept for continuity) ---- */
+const STORAGE_KEY = "todo_v1";
+const THEME_KEY = "todo_theme";
+const COMPACT_KEY = "todo_compact";
+const COLLAPSED_KEY = "todo_collapsed";
+const BRAINDUMP_KEY = "todo_braindump";
+const BRAINDUMP_OPEN_KEY = "todo_braindump_open";
+const REVIEW_KEY = "todo_last_review";
+const AREAS_KEY = "todo_areas";
+const VIEW_KEY = "todo_view";
+
+/* Snooze works on CALENDAR days: "Tomorrow" means the start of the next
+   day, not now+24h. Target is local midnight of the chosen day (DST-safe). */
+const SNOOZE_OPTIONS = [
+  { label: "Tomorrow", days: 1 },
+  { label: "3 days", days: 3 },
+  { label: "1 week", days: 7 },
+  { label: "2 weeks", days: 14 },
+  { label: "1 month", days: 30 }
+];
+/* Recurring tasks: when completed, a fresh copy is created, snoozed for the
+   interval, and lands on Next when the day arrives (completion-based cycle). */
+const REPEAT_OPTIONS = [
+  { label: "Daily", days: 1 },
+  { label: "Weekly", days: 7 },
+  { label: "Every 2 weeks", days: 14 },
+  { label: "Monthly", days: 30 },
+  { label: "Quarterly", days: 90 }
+];
+const repeatLabel = days =>
+  days === 1 ? "daily" : days === 7 ? "weekly" : days === 14 ? "every 2 weeks"
+  : days === 30 ? "monthly" : days === 90 ? "quarterly" : "every " + days + " days";
+const snoozeUntil = days => {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + days);
+  return d.getTime();
+};
+/* ---- recurrence ----
+   repeatMode "after"   : N days after completion (repeatDays)         — original behaviour
+   repeatMode "weekly"  : fixed weekday (repeatWeekday 0=Sun..6=Sat)
+   repeatMode "monthly" : fixed day of month (repeatDom 1..31, clamped to month length)
+   Fixed schedules never drift: the next instance is the next calendar
+   occurrence strictly after today, regardless of when you ticked the box. */
+const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const isRecurring = i => !!(i.repeatMode === "weekly" || i.repeatMode === "monthly" || i.repeatDays);
+const ordinal = n => n + (n % 100 >= 11 && n % 100 <= 13 ? "th" : n % 10 === 1 ? "st" : n % 10 === 2 ? "nd" : n % 10 === 3 ? "rd" : "th");
+const recurrenceLabel = i =>
+  i.repeatMode === "weekly" ? "every " + WEEKDAYS[i.repeatWeekday]
+  : i.repeatMode === "monthly" ? "monthly on the " + ordinal(i.repeatDom)
+  : i.repeatDays ? repeatLabel(i.repeatDays) + " after completion" : "";
+const nextOccurrence = i => {
+  const d = new Date(); d.setHours(0, 0, 0, 0);
+  if (i.repeatMode === "weekly") {
+    const delta = ((i.repeatWeekday - d.getDay()) + 7) % 7 || 7;
+    d.setDate(d.getDate() + delta);
+    return d.getTime();
+  }
+  if (i.repeatMode === "monthly") {
+    const dom = i.repeatDom;
+    const clampTo = (y, m) => new Date(y, m, Math.min(dom, new Date(y, m + 1, 0).getDate()));
+    let n = clampTo(d.getFullYear(), d.getMonth());
+    if (n.getTime() <= d.getTime()) n = clampTo(d.getFullYear(), d.getMonth() + 1);
+    n.setHours(0, 0, 0, 0);
+    return n.getTime();
+  }
+  return snoozeUntil(i.repeatDays || 1);
+};
+/* Waiting age: days since the last ping, or since the task was created */
+const waitingSince = i => i.lastPingAt || i.createdAt || i.modifiedAt || null;
+const waitingDays = i => { const s = waitingSince(i); return s ? Math.floor((Date.now() - s) / 864e5) : null; };
+const WAITING_WARN_DAYS = 14;
+/* Upcoming buckets for the Snoozed view: when does it come back? (Mon-based weeks) */
+const UPCOMING_ORDER = ["Tomorrow", "This week", "Next week", "Later this month", "Later"];
+const upcomingBucket = ts => {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const days = Math.round((dayStart(ts) - today.getTime()) / 864e5);
+  if (days <= 1) return "Tomorrow";
+  const dow = (today.getDay() + 6) % 7;           /* 0 = Monday */
+  const endOfWeek = 6 - dow;                      /* days until Sunday */
+  if (days <= endOfWeek) return "This week";
+  if (days <= endOfWeek + 7) return "Next week";
+  const d = new Date(ts);
+  if (d.getFullYear() === today.getFullYear() && d.getMonth() === today.getMonth()) return "Later this month";
+  return "Later";
+};
+const POSTPONED_MANY = 3; /* snoozed this many times or more → flagged in the review */
+/* midnight timestamps read as a date; legacy hour-based snoozes keep the time */
+const fmtSnoozeTs = ts => {
+  const d = new Date(ts);
+  return (d.getHours() === 0 && d.getMinutes() === 0) ? fmtDay(ts) : fmtDate(ts);
+};
+
+/* Normalize any task (old format, new format, imported) into the full model. */
+const normalizeItem = i => ({
+  id: i.id,
+  text: i.text || "",
+  tags: dedupeTagsCI(i.tags),
+  people: dedupeTagsCI(i.people),
+  done: !!i.done,
+  createdAt: i.createdAt || null,
+  modifiedAt: i.modifiedAt || null,
+  doneAt: i.doneAt || null,
+  note: i.note || "",
+  snoozedUntil: i.snoozedUntil ? dayStart(i.snoozedUntil) : null, /* legacy hour-based snoozes normalize to their day */
+  /* old-format active tasks were already clarified → "next" */
+  status: validStatus(i.status) || "next",
+  project: i.project || null,
+  repeatDays: Number.isFinite(+i.repeatDays) && +i.repeatDays > 0 ? Math.round(+i.repeatDays) : null,
+  repeatMode: i.repeatMode === "weekly" || i.repeatMode === "monthly" ? i.repeatMode : (Number.isFinite(+i.repeatDays) && +i.repeatDays > 0 ? "after" : null),
+  repeatWeekday: Number.isInteger(+i.repeatWeekday) && +i.repeatWeekday >= 0 && +i.repeatWeekday <= 6 ? +i.repeatWeekday : null,
+  repeatDom: Number.isInteger(+i.repeatDom) && +i.repeatDom >= 1 && +i.repeatDom <= 31 ? +i.repeatDom : null,
+  snoozeCount: Number.isFinite(+i.snoozeCount) && +i.snoozeCount > 0 ? Math.round(+i.snoozeCount) : 0,
+  lastPingAt: i.lastPingAt || null,
+  pingCount: Number.isFinite(+i.pingCount) && +i.pingCount > 0 ? Math.round(+i.pingCount) : 0
+});
+
+const loadItems = () => {
+  try {
+    const saved = store.getItem(STORAGE_KEY);
+    if (saved) return JSON.parse(saved).map(normalizeItem);
+  } catch (e) {}
+  return []; /* fresh start: no sample tasks */
+};
+const saveItems = items => { try { store.setItem(STORAGE_KEY, JSON.stringify(items)); return !store.volatile; } catch (e) { return false; } };
+
+/* ============================================================
+   Sync — the task list lives in a GitHub gist, optionally encrypted.
+
+   Why a gist: free, versioned, works from a static page (GitHub Pages),
+   needs only a classic token with the single "gist" scope.
+   Why encrypt: a "secret" gist is NOT private — anyone with its URL can
+   read it. With a passphrase the gist holds only AES-GCM ciphertext.
+
+   Payload (before encryption):
+     { version, savedAt, items[], tombstones{id: deletedAt},
+       areas[], areasAt, brainDump, brainAt }
+   Merge = per task, newest stamp wins (modifiedAt / createdAt / doneAt);
+   a deletion is a tombstone and wins over any older copy of the task.
+   ============================================================ */
+const SYNC_KEY = "todo_sync";
+const TOMB_KEY = "todo_tombstones";
+const GIST_FILE = "todo.json";
+const GIST_API = "https://api.github.com";
+const TOMB_TTL_MS = 180 * 864e5; /* forget tombstones after 6 months */
+
+const itemStamp = i => Math.max(i.modifiedAt || 0, i.createdAt || 0, i.doneAt || 0);
+const loadTombstones = () => { try { return JSON.parse(store.getItem(TOMB_KEY) || "{}") || {}; } catch (e) { return {}; } };
+const saveTombstones = t => { try { store.setItem(TOMB_KEY, JSON.stringify(t)); } catch (e) {} };
+const loadSyncConfig = () => { try { return JSON.parse(store.getItem(SYNC_KEY) || "null") || null; } catch (e) { return null; } };
+const saveSyncConfig = c => { try { c ? store.setItem(SYNC_KEY, JSON.stringify(c)) : store.removeItem(SYNC_KEY); } catch (e) {} };
+
+/* Merge two task sets + tombstone maps. Pure; returns new objects. */
+const mergeSets = (localItems, localTombs, remoteItems, remoteTombs) => {
+  const tombs = { ...(remoteTombs || {}) };
+  Object.entries(localTombs || {}).forEach(([id, ts]) => { tombs[id] = Math.max(ts, tombs[id] || 0); });
+  const byId = new Map();
+  (remoteItems || []).forEach(i => byId.set(String(i.id), i));
+  (localItems || []).forEach(i => {
+    const k = String(i.id), r = byId.get(k);
+    if (!r || itemStamp(i) >= itemStamp(r)) byId.set(k, i);
+  });
+  const now = Date.now();
+  const items = [];
+  byId.forEach((i, k) => { if (!(tombs[k] && tombs[k] >= itemStamp(i))) items.push(i); });
+  /* prune: tombstones that are old and no longer shadow anything */
+  Object.keys(tombs).forEach(k => { if (now - tombs[k] > TOMB_TTL_MS && !byId.has(k)) delete tombs[k]; });
+  /* keep a stable order: by creation, like the app does */
+  items.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  return { items, tombs };
+};
+const sameItems = (a, b) => a.length === b.length && JSON.stringify(a) === JSON.stringify(b);
+
+/* ---- crypto (WebCrypto, AES-256-GCM, PBKDF2-SHA256) ---- */
+const bufToB64 = buf => { const u = new Uint8Array(buf); let s = ""; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); };
+const b64ToBuf = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const deriveKey = async (pass, salt) => {
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pass), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({ name: "PBKDF2", salt, iterations: 250000, hash: "SHA-256" }, base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+};
+const encryptText = async (pass, text) => {
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKey(pass, salt);
+  const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(text));
+  return JSON.stringify({ "todo-encrypted": 1, alg: "AES-GCM/PBKDF2-250k", salt: bufToB64(salt), iv: bufToB64(iv), data: bufToB64(data) });
+};
+const decryptText = async (pass, obj) => {
+  const key = await deriveKey(pass, b64ToBuf(obj.salt));
+  const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: b64ToBuf(obj.iv) }, key, b64ToBuf(obj.data));
+  return new TextDecoder().decode(plain);
+};
+
+/* ---- gist REST ---- */
+const gistHeaders = token => ({ Authorization: "Bearer " + token, Accept: "application/vnd.github+json", "Content-Type": "application/json", "X-GitHub-Api-Version": "2022-11-28" });
+class SyncError extends Error { constructor(kind, msg) { super(msg); this.kind = kind; } }
+const gistRequest = async (token, method, path, body) => {
+  let res;
+  try { res = await fetch(GIST_API + path, { method, headers: gistHeaders(token), body: body ? JSON.stringify(body) : undefined, cache: "no-store" }); }
+  catch (e) { throw new SyncError("offline", "Network error — offline?"); }
+  if (res.status === 401) throw new SyncError("auth", "GitHub rejected the token (401). Is it a classic token with the gist scope, and not expired?");
+  if (res.status === 403) throw new SyncError("auth", "GitHub refused (403) — token lacks the gist scope, or rate limit hit.");
+  if (res.status === 404) throw new SyncError("notfound", "Gist not found (404). Check the gist ID, or that the token belongs to the same account.");
+  if (!res.ok) throw new SyncError("http", "GitHub error " + res.status);
+  return res.json();
+};
+const gistRead = async (token, gistId) => {
+  const g = await gistRequest(token, "GET", "/gists/" + gistId);
+  const f = g.files && g.files[GIST_FILE];
+  if (!f) throw new SyncError("format", "The gist has no " + GIST_FILE + " file.");
+  if (f.truncated && f.raw_url) {
+    let r; try { r = await fetch(f.raw_url, { cache: "no-store" }); } catch (e) { throw new SyncError("offline", "Network error while reading the gist."); }
+    if (!r.ok) throw new SyncError("http", "Could not read the gist content (" + r.status + ")");
+    return r.text();
+  }
+  return f.content;
+};
+const gistWrite = (token, gistId, content) => gistRequest(token, "PATCH", "/gists/" + gistId, { files: { [GIST_FILE]: { content } } });
+const gistCreate = async (token, content) => {
+  const g = await gistRequest(token, "POST", "/gists", { description: "todo — task sync (do not edit by hand)", public: false, files: { [GIST_FILE]: { content } } });
+  return g.id;
+};
+
+/* payload <-> text, honouring the passphrase */
+const encodePayload = async (payload, pass) => { const text = JSON.stringify(payload); return pass ? encryptText(pass, text) : text; };
+const decodePayload = async (text, pass) => {
+  let obj;
+  try { obj = JSON.parse(text); } catch (e) { throw new SyncError("format", "The gist does not contain valid JSON."); }
+  if (obj && obj["todo-encrypted"]) {
+    if (!pass) throw new SyncError("pass", "This gist is encrypted — enter the passphrase.");
+    let plain;
+    try { plain = await decryptText(pass, obj); } catch (e) { throw new SyncError("pass", "Wrong passphrase (could not decrypt the gist)."); }
+    try { obj = JSON.parse(plain); } catch (e) { throw new SyncError("format", "Decrypted content is not valid JSON."); }
+  } else if (pass && obj && Array.isArray(obj.items)) {
+    /* plain gist but a passphrase is set: accept it once, the next push will encrypt it */
+  }
+  if (!obj || !Array.isArray(obj.items)) throw new SyncError("format", "Unexpected gist format.");
+  return obj;
+};
+
+const h = React.createElement;
+
+/* Turn plain-text http(s) URLs into safe links. Text is NEVER rendered as
+   HTML (React escapes it), so pasted markup cannot inject — URLs inside it
+   simply become clickable. Trailing punctuation stays outside the link. */
+const URL_SPLIT_RE = /(https?:\/\/[^\s<>"')\]]+)/g;
+const linkify = (text, accent) => String(text).split(URL_SPLIT_RE).map((part, idx) => {
+  if (!/^https?:\/\//.test(part)) return part;
+  const m = part.match(/^(.*?)([.,;:!?]*)$/);
+  const url = m[1], trail = m[2];
+  return [
+    h("a", {
+      key: "u" + idx, href: url, target: "_blank", rel: "noopener noreferrer",
+      onClick: e => e.stopPropagation(),
+      style: { color: accent, textDecoration: "underline", textUnderlineOffset: 2, wordBreak: "break-all" }
+    }, url),
+    trail
+  ];
+});
+
+/* ---- minimal monochrome SVG icons ---- */
+const Icon = ({ name, size = 15 }) => {
+  const P = d => h("path", { key: d, d });
+  const paths = {
+    clock: [h("circle", { key: "c", cx: 12, cy: 12, r: 9 }), P("M12 7v5l3 2")],
+    pencil: [P("M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"), P("M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z")],
+    copy: [h("rect", { key: "r", x: 9, y: 9, width: 13, height: 13, rx: 2 }), P("M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1")],
+    trash: [P("M3 6h18"), P("M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"), P("M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2")],
+    note: [P("M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"), P("M14 2v6h6"), P("M8 13h8"), P("M8 17h5")],
+    move: [P("M8 3 4 7l4 4"), P("M4 7h16"), P("m16 21 4-4-4-4"), P("M20 17H4")],
+    search: [h("circle", { key: "c", cx: 11, cy: 11, r: 7.5 }), P("m21 21-4.8-4.8")],
+    sun: [h("circle", { key: "c", cx: 12, cy: 12, r: 4.5 }), P("M12 2v2.5"), P("M12 19.5V22"), P("M4.2 4.2l1.8 1.8"), P("M18 18l1.8 1.8"), P("M2 12h2.5"), P("M19.5 12H22"), P("M4.2 19.8 6 18"), P("M18 6l1.8-1.8")],
+    moon: [P("M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z")],
+    refresh: [P("M21 4v6h-6"), P("M20.5 15a9 9 0 1 1-2.1-9.4L21 10")],
+    chevD: [P("m6 9 6 6 6-6")],
+    chevR: [P("m9 6 6 6-6 6")],
+    check: [P("M20 6 9 17l-5-5")],
+    tag: [P("M20.6 13.4 12 22l-9-9 8.6-8.6a2 2 0 0 1 1.4-.6H19a2 2 0 0 1 2 2v6.2a2 2 0 0 1-.6 1.4z"), h("circle", { key: "c", cx: 16, cy: 8, r: 1.3, fill: "currentColor", stroke: "none" })],
+    grid: [h("rect", { key: "1", x: 3, y: 3, width: 7, height: 7, rx: 1 }), h("rect", { key: "2", x: 14, y: 3, width: 7, height: 7, rx: 1 }), h("rect", { key: "3", x: 3, y: 14, width: 7, height: 7, rx: 1 }), h("rect", { key: "4", x: 14, y: 14, width: 7, height: 7, rx: 1 })],
+    rows: [P("M3 5h18"), P("M3 12h18"), P("M3 19h18")],
+    download: [P("M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"), P("M7 10l5 5 5-5"), P("M12 15V3")],
+    upload: [P("M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"), P("M17 8l-5-5-5 5"), P("M12 3v12")],
+    inboxAdd: [P("M22 12h-6l-2 3h-4l-2-3H2"), P("M5.5 5.1 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.7 4H7.3a2 2 0 0 0-1.8 1.1z")],
+    repeat: [P("m17 2 4 4-4 4"), P("M3 11v-1a4 4 0 0 1 4-4h14"), P("m7 22-4-4 4-4"), P("M21 13v1a4 4 0 0 1-4 4H3")],
+    /* check + small clock: "complete, then wait" */
+    checkWait: [P("M3 12 7.5 16.5 14 8"), h("circle", { key: "c", cx: 17.5, cy: 17, r: 4.5 }), P("M17.5 14.8V17l1.6 1.1")],
+    person: [h("circle", { key: "c", cx: 12, cy: 8, r: 4 }), P("M4 21a8 8 0 0 1 16 0")],
+    cloud: [P("M17.5 19a4.5 4.5 0 0 0 .4-9A7 7 0 0 0 4.3 12.5 3.5 3.5 0 0 0 6.5 19z")],
+    lock: [h("rect", { key: "r", x: 4, y: 11, width: 16, height: 10, rx: 2 }), P("M8 11V7a4 4 0 0 1 8 0v4")]
+  };
+  return h("svg", { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.7, strokeLinecap: "round", strokeLinejoin: "round", style: { display: "block", flexShrink: 0 } }, paths[name]);
+};
+
+/* ---- small inline input with autocomplete (tags & projects) ---- */
+function SuggestInput({ placeholder, suggestionsPool, exclude, onSubmit, onClose, th, width }) {
+  const [val, setVal] = React.useState("");
+  const ref = React.useRef();
+  React.useEffect(() => ref.current?.focus(), []);
+  const exLower = (exclude || []).map(t => t.toLowerCase());
+  const suggestions = suggestionsPool.filter(t => !exLower.includes(t.toLowerCase()) && t.toLowerCase().includes(val.toLowerCase()));
+  const submit = v => { const t = (v !== undefined ? v : val).trim().replace(/^[#+@]/, ""); if (t) onSubmit(t); onClose(); };
+  return h("div", { style: { position: "relative", display: "inline-flex", alignItems: "center", gap: 4 } },
+    h("input", {
+      ref, value: val, onChange: e => setVal(e.target.value),
+      onKeyDown: e => { if (e.key === "Enter") submit(); if (e.key === "Escape") onClose(); },
+      placeholder,
+      style: { width: width || 100, padding: "3px 9px", fontSize: 11.5, border: "1px solid " + th.accent, borderRadius: 20, outline: "none", background: th.inputBg, color: th.text }
+    }),
+    suggestions.length > 0 && h("div", {
+      style: { position: "absolute", top: "100%", left: 0, background: th.card, border: "1px solid " + th.border, borderRadius: 10, zIndex: 10, minWidth: 140, maxHeight: 190, overflowY: "auto", boxShadow: th.shadowHover, marginTop: 4, padding: 4 }
+    }, suggestions.map(s => h("div", {
+      key: s, onMouseDown: e => { e.preventDefault(); submit(s); },
+      style: { padding: "6px 10px", cursor: "pointer", fontSize: 12.5, color: th.text, fontWeight: 500, borderRadius: 6 },
+      onMouseEnter: e => e.currentTarget.style.background = th.hover,
+      onMouseLeave: e => e.currentTarget.style.background = "transparent"
+    }, s)))
+  );
+}
+
+function Todo() {
+  const [items, setItems] = React.useState(loadItems);
+  const [input, setInput] = React.useState("");
+  const [editId, setEditId] = React.useState(null);
+  const [editText, setEditText] = React.useState("");
+  const [filterTags, setFilterTags] = React.useState([]);
+  const [groupByTag, setGroupByTag] = React.useState(false);
+  const [addingTagFor, setAddingTagFor] = React.useState(null);
+  const [addingProjectFor, setAddingProjectFor] = React.useState(null);
+  const [addingPersonFor, setAddingPersonFor] = React.useState(null);
+  const [customDays, setCustomDays] = React.useState("");
+  const [customDate, setCustomDate] = React.useState("");
+  const [filterPerson, setFilterPerson] = React.useState(null);
+  const [renamingTag, setRenamingTag] = React.useState(null);
+  const [editNoteId, setEditNoteId] = React.useState(null);
+  const [noteDraft, setNoteDraft] = React.useState("");
+  const [snoozeMenuFor, setSnoozeMenuFor] = React.useState(null);
+  const [repeatMenuFor, setRepeatMenuFor] = React.useState(null);
+  const [moveMenuFor, setMoveMenuFor] = React.useState(null);
+  const [showReview, setShowReview] = React.useState(false);
+  const [brainDump, setBrainDump] = React.useState(() => {
+    try { return store.getItem(BRAINDUMP_KEY) || ""; } catch(e) { return ""; }
+  });
+  const [showBrainDump, setShowBrainDump] = React.useState(() => {
+    try { return store.getItem(BRAINDUMP_OPEN_KEY) === "1"; } catch(e) { return false; }
+  });
+  const [lastReview, setLastReview] = React.useState(() => {
+    try { return Number(store.getItem(REVIEW_KEY)) || null; } catch(e) { return null; }
+  });
+  const [saved, setSaved] = React.useState(null);
+  const [storageBroken, setStorageBroken] = React.useState(store.volatile);
+  const [showInspector, setShowInspector] = React.useState(false);
+  const [storageEntries, setStorageEntries] = React.useState([]);
+  const refreshInspector = () => setStorageEntries(listStorageEntries());
+  const retestStorage = () => {
+    if (store.retest()) {
+      setStorageBroken(false); setShowInspector(false);
+      saveItems(items); /* persist current state for real */
+      setSaved("ok"); setTimeout(() => setSaved(null), 1500);
+      return true;
+    }
+    return false;
+  };
+  const deleteStorageKey = k => {
+    if (!confirm("Delete \u201C" + k + "\u201D from browser storage? If it belongs to another local HTML app, that app will lose its data.")) return;
+    try { window.localStorage.removeItem(k); } catch (e) {}
+    refreshInspector();
+    retestStorage(); /* if enough space was freed, recover automatically */
+  };
+  const [search, setSearch] = React.useState("");
+  const [view, setView] = React.useState(() => {
+    try { return store.getItem(VIEW_KEY) || "inbox"; } catch(e) { return "inbox"; }
+  });
+  const [showStats, setShowStats] = React.useState(false);
+  const [dark, setDark] = React.useState(() => {
+    try { return store.getItem(THEME_KEY) === "dark"; } catch(e) { return false; }
+  });
+  const [compact, setCompact] = React.useState(() => {
+    try { return store.getItem(COMPACT_KEY) === "1"; } catch(e) { return false; }
+  });
+  const [collapsedGroups, setCollapsedGroups] = React.useState(() => {
+    try { return new Set(JSON.parse(store.getItem(COLLAPSED_KEY) || "[]")); } catch(e) { return new Set(); }
+  });
+  /* areas of responsibility = designated tags */
+  const [areaTags, setAreaTags] = React.useState(() => {
+    try { return JSON.parse(store.getItem(AREAS_KEY) || "[]"); } catch(e) { return []; }
+  });
+  const toggleArea = tag => setAreaTags(prev => toggleIn(prev, tag).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })));
+  const th = dark ? themes.dark : themes.light;
+
+  /* minute tick so expired snoozes resurface automatically */
+  const [, setTick] = React.useState(0);
+  React.useEffect(() => { const t = setInterval(() => setTick(x => x + 1), 60000); return () => clearInterval(t); }, []);
+
+  React.useEffect(() => { document.body.style.background = th.bg; }, [dark]);
+  React.useEffect(() => { try { store.setItem(THEME_KEY, dark ? "dark" : "light"); } catch(e) {} }, [dark]);
+  React.useEffect(() => { try { store.setItem(COMPACT_KEY, compact ? "1" : "0"); } catch(e) {} }, [compact]);
+  React.useEffect(() => { try { store.setItem(COLLAPSED_KEY, JSON.stringify([...collapsedGroups])); } catch(e) {} }, [collapsedGroups]);
+  React.useEffect(() => { try { store.setItem(BRAINDUMP_KEY, brainDump); } catch(e) {} }, [brainDump]);
+  React.useEffect(() => { try { store.setItem(BRAINDUMP_OPEN_KEY, showBrainDump ? "1" : "0"); } catch(e) {} }, [showBrainDump]);
+  React.useEffect(() => { try { store.setItem(VIEW_KEY, view); } catch(e) {} }, [view]);
+  React.useEffect(() => { try { lastReview ? store.setItem(REVIEW_KEY, String(lastReview)) : store.removeItem(REVIEW_KEY); } catch(e) {} }, [lastReview]);
+  React.useEffect(() => { try { store.setItem(AREAS_KEY, JSON.stringify(areaTags)); } catch(e) {} }, [areaTags]);
+  /* every change to tasks → persisted immediately */
+  React.useEffect(() => { const ok = saveItems(items); if (!ok) setStorageBroken(true); setSaved(ok ? "ok" : "fail"); const t = setTimeout(() => setSaved(null), 1500); return () => clearTimeout(t); }, [items]);
+
+  const allTags = (() => {
+    const seen = new Map();
+    items.flatMap(i => i.tags).forEach(t => { const k = t.toLowerCase(); if (!seen.has(k)) seen.set(k, t); });
+    return [...seen.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  })();
+  const allProjects = [...new Set(items.map(i => i.project).filter(Boolean))].sort();
+  const allPeople = (() => {
+    const seen = new Map();
+    items.flatMap(i => i.people || []).forEach(p => { const k = p.toLowerCase(); if (!seen.has(k)) seen.set(k, p); });
+    return [...seen.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  })();
+
+  /* Tags with no active task and no activity for 30 days retire from all
+     pickers and suggestions. Data is untouched — archived tasks keep their
+     tags, and using a retired tag again instantly revives it. Tags marked
+     as areas never retire (they are deliberately curated). */
+  const STALE_TAG_MS = 30 * 864e5;
+  const tagMeta = (() => {
+    const m = new Map();
+    items.forEach(i => i.tags.forEach(t => {
+      const k = t.toLowerCase();
+      const e = m.get(k) || { hasActive: false, last: 0 };
+      if (!i.done) e.hasActive = true;
+      e.last = Math.max(e.last, i.modifiedAt || 0, i.createdAt || 0, i.doneAt || 0);
+      m.set(k, e);
+    }));
+    return m;
+  })();
+  const isStaleTag = t => {
+    const e = tagMeta.get(t.toLowerCase());
+    return !!e && !e.hasActive && e.last > 0 && (Date.now() - e.last) > STALE_TAG_MS;
+  };
+  const visibleTags = allTags.filter(t => !isStaleTag(t) || areaTags.some(a => sameTag(a, t)));
+
+  const active = items.filter(i => !i.done);
+  const activePeople = allPeople.filter(p => active.some(i => hasPerson(i, p)));
+  const listCount = s => active.filter(i => i.status === s && !isSnoozed(i)).length;
+  const snoozedCount = active.filter(isSnoozed).length;
+  const postponedCount = active.filter(i => i.snoozeCount >= POSTPONED_MANY).length;
+  const projectsWithoutNext = allProjects.filter(p => {
+    const t = active.filter(i => i.project === p);
+    return t.length > 0 && !t.some(i => i.status === "next" && !isSnoozed(i));
+  });
+  /* per-area review data: what's moving, what's queued, what's slipping */
+  const areaInfo = tag => {
+    const tagged = items.filter(i => hasTag(i, tag));
+    const act = tagged.filter(i => !i.done);
+    const c = s => act.filter(i => i.status === s && !isSnoozed(i)).length;
+    const last = Math.max(0, ...tagged.map(i => Math.max(i.modifiedAt || 0, i.createdAt || 0, i.doneAt || 0)));
+    return { next: c("next"), waiting: c("waiting"), someday: c("someday"), inbox: c("inbox"),
+             snoozed: act.filter(isSnoozed).length, doneWeek: tagged.filter(i => i.done && isThisWeek(i.doneAt)).length,
+             activeTotal: act.length, last, neglected: c("next") === 0 };
+  };
+  const neglectedAreas = areaTags.filter(t => areaInfo(t).neglected);
+
+  const stats = {
+    createdToday: items.filter(i => isToday(i.createdAt)).length,
+    completedToday: items.filter(i => i.done && isToday(i.doneAt)).length,
+    completedWeek: items.filter(i => i.done && isThisWeek(i.doneAt)).length,
+    totalActive: active.length,
+    totalDone: items.length - active.length,
+    total: items.length
+  };
+
+  /* ---------------- mutations (each persists via the [items] effect) ---------------- */
+  const updateItems = fn => setItems(prev => fn(prev));
+  const add = () => {
+    if (!input.trim()) return;
+    const { clean, tags, project, people, status: routed, snoozedUntil } = parseInput(input);
+    /* a routing token (#w8, #next…) wins; otherwise capture into the current list, else Inbox */
+    const status = routed || (STATUS_KEYS.includes(view) ? view : "inbox");
+    updateItems(prev => [...prev, normalizeItem({
+      id: Date.now(), text: clean || input.trim(), tags, project, people,
+      done: false, createdAt: Date.now(), status, snoozedUntil
+    })]);
+    setInput("");
+    if (routed && routed !== view && STATUS_KEYS.includes(view)) flash("Added to " + STATUSES[routed].label + (snoozedUntil ? " · hidden until " + fmtDay(snoozedUntil) : ""));
+    else if (snoozedUntil) flash("Snoozed until " + fmtDay(snoozedUntil));
+  };
+  /* short confirmation line under the capture bar */
+  const [flashMsg, setFlashMsg] = React.useState(null);
+  const flash = msg => { setFlashMsg(msg); clearTimeout(flash.t); flash.t = setTimeout(() => setFlashMsg(null), 2600); };
+  const startEdit = item => { setEditId(item.id); setEditText(item.text); };
+  const saveEdit = id => { updateItems(prev => prev.map(i => i.id === id ? { ...i, text: editText.trim() || i.text, modifiedAt: Date.now() } : i)); setEditId(null); };
+  const startNote = item => { setEditNoteId(item.id); setNoteDraft(item.note || ""); };
+  const saveNote = id => { updateItems(prev => prev.map(i => i.id === id ? { ...i, note: noteDraft.trim(), modifiedAt: Date.now() } : i)); setEditNoteId(null); };
+  const deleteNote = id => { updateItems(prev => prev.map(i => i.id === id ? { ...i, note: "", modifiedAt: Date.now() } : i)); setEditNoteId(null); };
+  /* every manual snooze bumps snoozeCount — the "how often do I put this off?" signal */
+  const snooze = (id, days) => { updateItems(prev => prev.map(i => i.id === id ? { ...i, snoozedUntil: snoozeUntil(days), snoozeCount: (i.snoozeCount || 0) + 1, modifiedAt: Date.now() } : i)); setSnoozeMenuFor(null); };
+  /* snooze to an explicit local date (from the date picker), start of that day */
+  const snoozeToDate = (id, ymd) => {
+    const m = String(ymd || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return;
+    const d = new Date(+m[1], +m[2] - 1, +m[3]); d.setHours(0, 0, 0, 0);
+    if (d.getTime() <= Date.now()) return;
+    updateItems(prev => prev.map(i => i.id === id ? { ...i, snoozedUntil: d.getTime(), snoozeCount: (i.snoozeCount || 0) + 1, modifiedAt: Date.now() } : i));
+    setSnoozeMenuFor(null);
+  };
+  /* Ping a Waiting task: note the nudge, restart the waiting clock, hide it for a week */
+  const ping = (id, days = 7) => updateItems(prev => prev.map(i => {
+    if (i.id !== id) return i;
+    const now = Date.now();
+    const line = "Pinged " + fmtDay(now);
+    return { ...i, lastPingAt: now, pingCount: (i.pingCount || 0) + 1, snoozedUntil: snoozeUntil(days), modifiedAt: now,
+             note: i.note ? i.note + "\n" + line : line };
+  }));
+  /* fixed-schedule recurrence */
+  const setRepeatWeekly = (id, weekday) => { updateItems(prev => prev.map(i => i.id === id ? { ...i, repeatMode: "weekly", repeatWeekday: weekday, repeatDays: null, modifiedAt: Date.now() } : i)); setRepeatMenuFor(null); };
+  const setRepeatMonthly = (id, dom) => { if (!(dom >= 1 && dom <= 31)) return; updateItems(prev => prev.map(i => i.id === id ? { ...i, repeatMode: "monthly", repeatDom: dom, repeatDays: null, modifiedAt: Date.now() } : i)); setRepeatMenuFor(null); };
+  const clearRepeat = id => { updateItems(prev => prev.map(i => i.id === id ? { ...i, repeatMode: null, repeatDays: null, repeatWeekday: null, repeatDom: null, modifiedAt: Date.now() } : i)); setRepeatMenuFor(null); };
+  /* Copy a 1:1 agenda for a person to the clipboard: open Next/Inbox items to
+     discuss, then what you're waiting for from them (with how long). */
+  const [copiedAgendaFor, setCopiedAgendaFor] = React.useState(null);
+  const agendaText = p => {
+    const mine = active.filter(i => hasPerson(i, p));
+    const line = i => "• " + i.text + (i.project ? " (" + i.project + ")" : "");
+    const discuss = mine.filter(i => i.status !== "waiting" && i.status !== "someday");
+    const waiting = mine.filter(i => i.status === "waiting");
+    const out = ["Agenda – " + p + ", " + fmtDay(Date.now())];
+    if (discuss.length) out.push(...discuss.map(line));
+    if (waiting.length) out.push("Czekam od Ciebie:", ...waiting.map(i => line(i) + (waitingDays(i) > 0 ? " – od " + waitingDays(i) + " dni" : "")));
+    if (!discuss.length && !waiting.length) out.push("(brak otwartych punktów)");
+    return out.join("\n");
+  };
+  const copyAgenda = p => {
+    const text = agendaText(p);
+    const done = () => { setCopiedAgendaFor(p); setTimeout(() => setCopiedAgendaFor(null), 1800); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, () => prompt("Copy the agenda:", text));
+    else prompt("Copy the agenda:", text);
+  };
+  /* Rename a tag everywhere (case-insensitive match). Renaming onto an
+     existing tag merges the two. Areas and the active filter follow along. */
+  const renameTag = (from, to) => {
+    const t = normalizeTag(to);
+    if (!t || sameTag(from, t) && from === t) return;
+    updateItems(prev => prev.map(i => hasTag(i, from) ? { ...i, tags: dedupeTagsCI(i.tags.map(x => sameTag(x, from) ? t : x)), modifiedAt: Date.now() } : i));
+    setAreaTags(prev => prev.some(a => sameTag(a, from)) ? dedupeTagsCI(prev.map(a => sameTag(a, from) ? t : a)).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })) : prev);
+    setFilterTags(prev => dedupeTagsCI(prev.map(a => sameTag(a, from) ? t : a)));
+  };
+  const addPerson = (id, p) => updateItems(prev => prev.map(i => i.id === id && !hasPerson(i, p) ? { ...i, people: [...(i.people || []), p.trim()], modifiedAt: Date.now() } : i));
+  const removePerson = (id, p) => updateItems(prev => prev.map(i => i.id === id ? { ...i, people: (i.people || []).filter(x => x !== p), modifiedAt: Date.now() } : i));
+  /* Complete a task AND spawn its follow-up in Waiting: same project, tags and
+     people carry over, the title is prefilled and opened for editing so it is
+     one keystroke away from "Waiting for X to reply". */
+  const completeAndWait = id => {
+    const src = items.find(i => i.id === id);
+    if (!src) return;
+    const now = Date.now();
+    const newId = now + Math.random();
+    const who = (src.people || []).length ? " from " + src.people.join(", ") : "";
+    const follow = normalizeItem({
+      id: newId, text: "Waiting for reply" + who + ": " + src.text, tags: src.tags, people: src.people, project: src.project,
+      done: false, createdAt: now, status: "waiting"
+    });
+    if (!src.done) toggle(id); /* handles recurring tasks the same way as a normal completion */
+    updateItems(prev => prev.concat(follow));
+    setView("waiting"); setFilterTags([]); setSearch("");
+    setEditId(newId); setEditText(follow.text);
+  };
+  const unsnooze = id => updateItems(prev => prev.map(i => i.id === id ? { ...i, snoozedUntil: null, modifiedAt: Date.now() } : i));
+  const setRepeat = (id, days) => { updateItems(prev => prev.map(i => i.id === id ? { ...i, repeatDays: days, repeatMode: days ? "after" : null, repeatWeekday: null, repeatDom: null, modifiedAt: Date.now() } : i)); setRepeatMenuFor(null); };
+  const setStatus = (id, status) => { updateItems(prev => prev.map(i => i.id === id ? { ...i, status, modifiedAt: Date.now() } : i)); setMoveMenuFor(null); };
+  const addTag = (id, tag) => updateItems(prev => prev.map(i => i.id === id && !hasTag(i, tag) ? { ...i, tags: [...i.tags, tag.trim()], modifiedAt: Date.now() } : i));
+  const removeTag = (id, tag) => updateItems(prev => prev.map(i => i.id === id ? { ...i, tags: i.tags.filter(t => t !== tag), modifiedAt: Date.now() } : i));
+  const setProject = (id, project) => updateItems(prev => prev.map(i => i.id === id ? { ...i, project: project || null, modifiedAt: Date.now() } : i));
+  const toggle = id => updateItems(prev => {
+    const src = prev.find(i => i.id === id);
+    if (!src) return prev;
+    if (!src.done && isRecurring(src)) {
+      /* completing a recurring task: archive this occurrence (recurrence
+         detaches to history), spawn the next one snoozed until its next
+         occurrence — interval after completion, or the fixed calendar slot */
+      const now = Date.now();
+      const doneCopy = { ...src, done: true, doneAt: now, modifiedAt: now, snoozedUntil: null, repeatDays: null, repeatMode: null, repeatWeekday: null, repeatDom: null };
+      const nextInstance = { ...src, id: now + Math.random(), done: false, doneAt: null, createdAt: now, modifiedAt: null,
+                             status: "next", snoozedUntil: nextOccurrence(src), snoozeCount: 0, lastPingAt: null, pingCount: 0 };
+      return prev.map(i => i.id === id ? doneCopy : i).concat(nextInstance);
+    }
+    return prev.map(i => i.id === id
+      ? { ...i, done: !i.done, modifiedAt: Date.now(), doneAt: !i.done ? Date.now() : null, snoozedUntil: !i.done ? null : i.snoozedUntil }
+      : i);
+  });
+  /* deleting leaves a tombstone so the deletion also wins on other devices */
+  const tombsRef = React.useRef(loadTombstones());
+  const addTombstones = ids => { const now = Date.now(); ids.forEach(id => { tombsRef.current[String(id)] = now; }); saveTombstones(tombsRef.current); };
+  const remove = id => { addTombstones([id]); updateItems(prev => prev.filter(i => i.id !== id)); };
+  const duplicate = id => updateItems(prev => {
+    const src = prev.find(i => i.id === id);
+    if (!src) return prev;
+    return [...prev, { ...src, id: Date.now(), done: false, createdAt: Date.now(), modifiedAt: null, doneAt: null, snoozedUntil: null, snoozeCount: 0, lastPingAt: null, pingCount: 0 }];
+  });
+
+  /* ---------------- import / export ---------------- */
+  const exportJSON = () => {
+    const data = JSON.stringify(items, null, 2);
+    const blob = new Blob([data], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "todo-backup-" + new Date().toISOString().slice(0,10) + ".json";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+  };
+  const fileRef = React.useRef();
+  const importJSON = e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        if (Array.isArray(data)) {
+          if (items.length > 0 && !confirm("Importing will replace your current " + items.length + " tasks with " + data.length + " tasks from the file. Continue?")) return;
+          const imported = data.map(normalizeItem);
+          const keep = new Set(imported.map(i => String(i.id)));
+          addTombstones(items.filter(i => !keep.has(String(i.id))).map(i => i.id)); /* replaced tasks are deletions for sync */
+          setItems(imported);
+        } else { alert("Invalid file format — expected an array of tasks."); }
+      } catch (err) { alert("Could not parse JSON: " + err.message); }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  /* ---------------- file auto-save (File System Access API) ----------------
+     Persistence that works even when localStorage is blocked: pick a JSON
+     file once, and every change is written straight to it. Chrome/Edge. */
+  const fsSupported = typeof window.showSaveFilePicker === "function" && typeof window.showOpenFilePicker === "function";
+  const [fileHandle, setFileHandle] = React.useState(null);
+  const [fileName, setFileName] = React.useState(null);
+  const [fileState, setFileState] = React.useState("off"); /* off | on | error */
+  const writeToFile = async (handle, data) => {
+    const w = await handle.createWritable();
+    await w.write(data);
+    await w.close();
+  };
+  const enableFileAutosave = async () => {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: "todo-data.json",
+        types: [{ description: "JSON", accept: { "application/json": [".json"] } }]
+      });
+      await writeToFile(handle, JSON.stringify(items, null, 2));
+      setFileHandle(handle); setFileName(handle.name); setFileState("on");
+    } catch (e) { if (!e || e.name !== "AbortError") setFileState("error"); }
+  };
+  const resumeFromFile = async () => {
+    try {
+      const [handle] = await window.showOpenFilePicker({
+        types: [{ description: "JSON", accept: { "application/json": [".json"] } }]
+      });
+      const file = await handle.getFile();
+      const data = JSON.parse(await file.text());
+      if (!Array.isArray(data)) { alert("Invalid file format — expected an array of tasks."); return; }
+      setItems(data.map(normalizeItem));
+      setFileHandle(handle); setFileName(handle.name); setFileState("on");
+    } catch (e) { if (!e || e.name !== "AbortError") setFileState("error"); }
+  };
+  /* every change to tasks → also written to the chosen file */
+  React.useEffect(() => {
+    if (!fileHandle) return;
+    let cancelled = false;
+    writeToFile(fileHandle, JSON.stringify(items, null, 2))
+      .then(() => { if (!cancelled && fileState !== "on") setFileState("on"); })
+      .catch(() => { if (!cancelled) setFileState("error"); });
+    return () => { cancelled = true; };
+  }, [items, fileHandle]);
+
+  /* ---------------- gist sync ----------------
+     config = { token, gistId, pass }  (kept in this browser's storage only)
+     Flow: pull → merge → (if anything local is newer) push. Pull runs on
+     connect, on page load, when the tab regains focus and every 3 minutes;
+     push runs 1.5 s after the last local change. All of it is serialised
+     through one queue so two runs never race. */
+  const [syncCfg, setSyncCfg] = React.useState(loadSyncConfig);
+  const [syncUI, setSyncUI] = React.useState({ status: syncCfg ? "idle" : "off", msg: "", lastAt: null }); /* off | idle | syncing | error */
+  const [showSync, setShowSync] = React.useState(false);
+  const [syncForm, setSyncForm] = React.useState(() => ({ token: (syncCfg && syncCfg.token) || "", gistId: (syncCfg && syncCfg.gistId) || "", pass: (syncCfg && syncCfg.pass) || "" }));
+  const latest = React.useRef({ items, areaTags, brainDump });
+  latest.current = { items, areaTags, brainDump };
+  const metaAt = React.useRef({ areasAt: 0, brainAt: 0 });
+  const firstMeta = React.useRef(true);
+  React.useEffect(() => { if (firstMeta.current) { firstMeta.current = false; return; } metaAt.current.areasAt = Date.now(); }, [areaTags]);
+  const firstBrain = React.useRef(true);
+  React.useEffect(() => { if (firstBrain.current) { firstBrain.current = false; return; } metaAt.current.brainAt = Date.now(); }, [brainDump]);
+  const lastPushed = React.useRef(""); /* serialized payload last known to be in the gist */
+  const chain = React.useRef(Promise.resolve());
+  const applyingRemote = React.useRef(false);
+
+  const buildPayload = () => ({
+    version: 2, savedAt: Date.now(),
+    items: latest.current.items, tombstones: tombsRef.current,
+    areas: latest.current.areaTags, areasAt: metaAt.current.areasAt,
+    brainDump: latest.current.brainDump, brainAt: metaAt.current.brainAt
+  });
+  const payloadKey = p => JSON.stringify([p.items, p.tombstones, p.areas, p.brainDump]);
+
+  /* merge a remote payload into local state; returns true if local changed */
+  const applyRemote = remote => {
+    const { items: merged, tombs } = mergeSets(latest.current.items, tombsRef.current, (remote.items || []).map(normalizeItem), remote.tombstones || {});
+    tombsRef.current = tombs; saveTombstones(tombs);
+    let changed = false;
+    if (!sameItems(merged, latest.current.items)) { applyingRemote.current = true; setItems(merged); latest.current.items = merged; changed = true; }
+    if ((remote.areasAt || 0) > metaAt.current.areasAt && Array.isArray(remote.areas)) { metaAt.current.areasAt = remote.areasAt; setAreaTags(remote.areas); latest.current.areaTags = remote.areas; changed = true; }
+    if ((remote.brainAt || 0) > metaAt.current.brainAt && typeof remote.brainDump === "string") { metaAt.current.brainAt = remote.brainAt; setBrainDump(remote.brainDump); latest.current.brainDump = remote.brainDump; changed = true; }
+    return changed;
+  };
+
+  /* one full cycle: pull, merge, push if needed */
+  const syncCycle = (cfg, opts = {}) => {
+    const run = async () => {
+      if (!cfg || !cfg.token || !cfg.gistId) return;
+      setSyncUI(u => ({ ...u, status: "syncing", msg: "" }));
+      try {
+        const text = await gistRead(cfg.token, cfg.gistId);
+        const remote = await decodePayload(text, cfg.pass);
+        applyRemote(remote);
+        const mine = buildPayload();
+        const remoteKey = payloadKey({ items: (remote.items || []).map(normalizeItem), tombstones: remote.tombstones || {}, areas: remote.areas || [], brainDump: remote.brainDump || "" });
+        const needPush = payloadKey(mine) !== remoteKey || (!!cfg.pass && !JSON.parse(text)["todo-encrypted"]);
+        if (needPush || opts.force) {
+          await gistWrite(cfg.token, cfg.gistId, await encodePayload(mine, cfg.pass));
+        }
+        lastPushed.current = payloadKey(mine);
+        setSyncUI({ status: "idle", msg: "", lastAt: Date.now() });
+      } catch (e) {
+        setSyncUI(u => ({ ...u, status: "error", msg: e.message || String(e), kind: e.kind }));
+      }
+    };
+    chain.current = chain.current.then(run, run);
+    return chain.current;
+  };
+
+  /* connect: validate token, create the gist if none given, then sync */
+  const connectSync = async () => {
+    const token = syncForm.token.trim(), pass = syncForm.pass, gistId = syncForm.gistId.trim();
+    if (!token) { setSyncUI(u => ({ ...u, status: "error", msg: "Paste a GitHub token first." })); return; }
+    setSyncUI(u => ({ ...u, status: "syncing", msg: "" }));
+    try {
+      let id = gistId;
+      if (!id) {
+        id = await gistCreate(token, await encodePayload(buildPayload(), pass));
+        setSyncForm(f => ({ ...f, gistId: id }));
+      }
+      const cfg = { token, gistId: id, pass };
+      saveSyncConfig(cfg); setSyncCfg(cfg);
+      await syncCycle(cfg);
+    } catch (e) {
+      setSyncUI(u => ({ ...u, status: "error", msg: e.message || String(e), kind: e.kind }));
+    }
+  };
+  const disconnectSync = () => { saveSyncConfig(null); setSyncCfg(null); setSyncUI({ status: "off", msg: "", lastAt: null }); };
+
+  /* push (debounced) after local changes */
+  const pushTimer = React.useRef(null);
+  React.useEffect(() => {
+    if (!syncCfg) return;
+    if (applyingRemote.current) { applyingRemote.current = false; return; }
+    if (payloadKey(buildPayload()) === lastPushed.current) return;
+    clearTimeout(pushTimer.current);
+    pushTimer.current = setTimeout(() => syncCycle(syncCfg), 1500);
+    return () => clearTimeout(pushTimer.current);
+  }, [items, areaTags, brainDump, syncCfg]);
+
+  /* pull on load, on focus, periodically */
+  React.useEffect(() => {
+    if (!syncCfg) return;
+    syncCycle(syncCfg);
+    const onVis = () => { if (document.visibilityState === "visible") syncCycle(syncCfg); };
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", onVis);
+    const t = setInterval(() => syncCycle(syncCfg), 3 * 60000);
+    return () => { document.removeEventListener("visibilitychange", onVis); window.removeEventListener("focus", onVis); clearInterval(t); };
+  }, [syncCfg]);
+
+  /* ---------------- filtering per view ---------------- */
+  const searchLower = search.toLowerCase();
+  const matchesSearch = i => !search
+    || i.text.toLowerCase().includes(searchLower)
+    || (i.note && i.note.toLowerCase().includes(searchLower))
+    || (i.project && i.project.toLowerCase().includes(searchLower))
+    || i.tags.some(t => t.toLowerCase().includes(searchLower))
+    || (i.people || []).some(p => p.toLowerCase().includes(searchLower));
+
+  /* Searching from an active list widens the scope to ALL active lists
+     (inbox, next, waiting, someday, snoozed) — never done/archive. */
+  const globalSearch = search.trim().length > 0 && (STATUS_KEYS.includes(view) || view === "snoozed");
+  const viewFiltered =
+      view === "done"      ? items.filter(i => i.done)
+    : view === "doneToday" ? items.filter(i => i.done && isToday(i.doneAt))
+    : globalSearch         ? active
+    : view === "snoozed"   ? active.filter(isSnoozed).sort((a, b) => a.snoozedUntil - b.snoozedUntil)
+    : view === "postponed" ? active.filter(i => i.snoozeCount >= POSTPONED_MANY).sort((a, b) => b.snoozeCount - a.snoozeCount)
+    : view === "projects"  ? active.filter(i => i.project)
+    : view === "people"    ? active.filter(i => (i.people || []).length)
+    : active.filter(i => i.status === view && !isSnoozed(i));
+
+  const tagCountMap = new Map(); /* lower-key -> {name, count} */
+  viewFiltered.forEach(i => (i.tags || []).forEach(t => {
+    const k = t.toLowerCase();
+    const e = tagCountMap.get(k) || { name: t, count: 0 };
+    e.count++; tagCountMap.set(k, e);
+  }));
+  const viewTagCount = tag => (tagCountMap.get(tag.toLowerCase()) || { count: 0 }).count;
+  const chipTags = (() => {
+    const seen = new Map();
+    [...tagCountMap.values()].map(e => e.name).concat(filterTags).forEach(t => { const k = t.toLowerCase(); if (!seen.has(k)) seen.set(k, t); });
+    return [...seen.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  })();
+
+  const visible = (filterTags.length > 0 ? viewFiltered.filter(i => filterTags.every(ft => hasTag(i, ft))) : viewFiltered)
+    .filter(i => !filterPerson || hasPerson(i, filterPerson))
+    .filter(matchesSearch);
+
+  const grouped =
+    view === "projects"
+      ? allProjects.reduce((acc, p) => { const t = visible.filter(i => i.project === p); if (t.length) acc[p] = t; return acc; }, {})
+      : view === "people"
+      ? allPeople.reduce((acc, p) => { const t = visible.filter(i => hasPerson(i, p)); if (t.length) acc[p] = t; return acc; }, {})
+      : view === "snoozed" && !groupByTag
+      ? /* Upcoming: bucket by the day the task comes back (items are already date-sorted) */
+        (() => {
+          const acc = {};
+          visible.forEach(i => { const b = upcomingBucket(i.snoozedUntil); (acc[b] = acc[b] || []).push(i); });
+          return UPCOMING_ORDER.reduce((o, k) => { if (acc[k]) o[k] = acc[k]; return o; }, {});
+        })()
+      : groupByTag
+        ? (() => {
+            const seen = new Map();
+            visible.forEach(i => i.tags.forEach(t => { const k = t.toLowerCase(); if (!seen.has(k)) seen.set(k, t); }));
+            const names = [...seen.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+            const acc = {};
+            names.forEach(tag => { acc[tag] = visible.filter(i => hasTag(i, tag)); });
+            const untagged = visible.filter(i => i.tags.length === 0);
+            if (untagged.length) acc["No tag"] = untagged;
+            return acc;
+          })()
+        : { "": visible };
+
+  const groupNames = Object.keys(grouped).filter(g => g);
+  const groupingOn = view === "projects" || view === "people" || view === "snoozed" || groupByTag;
+  const allCollapsed = groupNames.length > 0 && groupNames.every(g => collapsedGroups.has(g));
+  const toggleGroup = name => setCollapsedGroups(prev => { const n = new Set(prev); n.has(name) ? n.delete(name) : n.add(name); return n; });
+  const toggleAllGroups = () => setCollapsedGroups(allCollapsed ? new Set() : new Set(groupNames));
+
+  /* ---------------- shared style helpers ---------------- */
+  const ghost = (activeState) => ({
+    border: "1px solid " + (activeState ? th.accent : th.border),
+    color: activeState ? th.accent : th.muted,
+    background: activeState ? th.accent + "14" : "transparent",
+    padding: "6px 12px", display: "inline-flex", alignItems: "center", gap: 6
+  });
+  const primaryBtn = {
+    background: th.accent, color: th.accentText, border: "none", borderRadius: 9,
+    padding: "10px 18px", cursor: "pointer", fontSize: 13.5, fontWeight: 600
+  };
+  const smallBtn = {
+    background: "transparent", color: th.muted, border: "1px solid " + th.border, borderRadius: 8,
+    padding: "5px 12px", cursor: "pointer", fontSize: 12, fontWeight: 500
+  };
+
+  /* clarify / move buttons */
+  const clarifyBtn = (item, key) => h("button", {
+    key, className: "ghost-btn",
+    onClick: () => setStatus(item.id, key),
+    title: STATUSES[key].label + " — " + STATUSES[key].hint,
+    style: { ...smallBtn, padding: "4px 11px", fontSize: 11.5 },
+    onMouseEnter: e => { e.currentTarget.style.borderColor = th.accent; e.currentTarget.style.color = th.accent; },
+    onMouseLeave: e => { e.currentTarget.style.borderColor = th.border; e.currentTarget.style.color = th.muted; }
+  }, STATUSES[key].label);
+
+  const iconBtn = (props, iconName, danger) => h("button", {
+    className: "icon-btn", ...props,
+    style: { color: th.faint, ...(props.style || {}) },
+    onMouseEnter: e => { e.currentTarget.style.color = danger ? th.danger : th.text; e.currentTarget.style.background = th.hover; },
+    onMouseLeave: e => { e.currentTarget.style.color = th.faint; e.currentTarget.style.background = "transparent"; }
+  }, h(Icon, { name: iconName }));
+
+  /* ---------------- single task card ---------------- */
+  const ItemRow = ({ item, showProjectBadge, showStatusLabel }) => h("li", {
+    key: item.id,
+    style: {
+      background: item.done ? th.cardDone : th.card, borderRadius: 12,
+      border: "1px solid " + th.border, marginBottom: compact ? 8 : 12,
+      padding: compact ? "10px 14px" : "14px 16px", opacity: item.done ? 0.55 : 1,
+      breakInside: "avoid", WebkitColumnBreakInside: "avoid", boxShadow: th.shadow,
+      listStyle: "none", position: "relative", transition: "box-shadow 0.15s"
+    },
+    onMouseEnter: e => e.currentTarget.style.boxShadow = th.shadowHover,
+    onMouseLeave: e => e.currentTarget.style.boxShadow = th.shadow
+  },
+    h("div", { style: { display: "flex", alignItems: "flex-start", gap: 12 } },
+      h("input", { type: "checkbox", checked: item.done, onChange: () => toggle(item.id), title: item.done ? "Restore" : "Complete",
+        style: { marginTop: 3, width: 16, height: 16, cursor: "pointer", flexShrink: 0, accentColor: th.accent } }),
+      h("div", { style: { flex: 1, minWidth: 0 } },
+
+        /* title row + toolbar */
+        h("div", { style: { display: "flex", alignItems: "flex-start", gap: 8 } },
+          h("div", { style: { flex: 1, minWidth: 0 } },
+            editId === item.id
+              ? h("textarea", {
+                  autoFocus: true, value: editText, rows: 1,
+                  ref: el => { if (el) { el.style.height = "auto"; el.style.height = el.scrollHeight + "px"; } },
+                  onFocus: e => { const v = e.target.value; e.target.setSelectionRange(v.length, v.length); },
+                  onChange: e => { setEditText(e.target.value); e.target.style.height = "auto"; e.target.style.height = e.target.scrollHeight + "px"; },
+                  onKeyDown: e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveEdit(item.id); } if (e.key === "Escape") setEditId(null); },
+                  style: { width: "100%", padding: "10px 12px", borderRadius: 10, border: "1px solid " + th.accent, fontSize: 14.5, fontWeight: 500, lineHeight: 1.5, outline: "none", boxSizing: "border-box", background: th.inputBg, color: th.text, resize: "none", overflow: "hidden", display: "block" }
+                })
+              : h("div", {
+                  onDoubleClick: () => startEdit(item),
+                  style: { textDecoration: item.done ? "line-through" : "none", color: item.done ? th.faint : th.text, fontSize: 14, fontWeight: 500, lineHeight: 1.45, cursor: "text", whiteSpace: compact ? "nowrap" : "normal", overflow: compact ? "hidden" : "visible", textOverflow: "ellipsis", overflowWrap: "anywhere" },
+                  title: "Double-click to edit"
+                },
+                showStatusLabel && !item.done && h("span", { style: { fontSize: 10, fontWeight: 600, letterSpacing: 0.8, textTransform: "uppercase", color: th.faint, marginRight: 8, verticalAlign: "1px" } }, taskHomeLabel(item)),
+                item.text)
+          ),
+          /* toolbar — appears on hover, hidden while editing to give the editor full width */
+          editId !== item.id && h("div", { className: "card-toolbar", style: { display: "flex", gap: 1, flexShrink: 0, position: "absolute", top: compact ? 5 : 9, right: 8, background: item.done ? th.cardDone : th.card, border: "1px solid " + th.border, borderRadius: 9, padding: "2px 4px", boxShadow: th.shadow, zIndex: 2 } },
+            !item.done && item.status !== "inbox" && iconBtn({ onClick: () => setMoveMenuFor(moveMenuFor === item.id ? null : item.id), title: "Move to another list", key: "mv" }, "move"),
+            !item.done && iconBtn({ onClick: () => setSnoozeMenuFor(snoozeMenuFor === item.id ? null : item.id), title: "Snooze", key: "sn" }, "clock"),
+            !item.done && iconBtn({ onClick: () => completeAndWait(item.id), title: "Complete, then wait — marks this done and creates a follow-up in Waiting (same project, tags, people)", key: "cw", style: { color: th.green } }, "checkWait"),
+            !item.done && iconBtn({ onClick: () => setRepeatMenuFor(repeatMenuFor === item.id ? null : item.id), title: isRecurring(item) ? "Repeats " + recurrenceLabel(item) : "Make recurring", key: "rp", style: isRecurring(item) ? { color: th.accent } : undefined }, "repeat"),
+            iconBtn({ onClick: () => (editNoteId === item.id ? setEditNoteId(null) : startNote(item)), title: item.note ? "Edit note" : "Add note", key: "nt" }, "note"),
+            iconBtn({ onClick: () => startEdit(item), title: "Edit", key: "ed" }, "pencil"),
+            iconBtn({ onClick: () => duplicate(item.id), title: "Duplicate", key: "du" }, "copy"),
+            iconBtn({ onClick: () => remove(item.id), title: "Delete", key: "de" }, "trash", true)
+          )
+        ),
+
+        /* tags + project row */
+        !(compact && !item.tags.length && !item.project && !(item.people || []).length && addingTagFor !== item.id && addingProjectFor !== item.id && addingPersonFor !== item.id) &&
+        h("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginTop: 8 } },
+          /* people chips — @name */
+          (item.people || []).map(p => h("span", {
+            key: "p:" + p,
+            style: { display: "inline-flex", alignItems: "center", gap: 4, background: personColor(p) + "18", color: personColor(p), border: "1px solid " + personColor(p) + "44", borderRadius: 20, padding: "2px 9px 2px 7px", fontSize: 11.5, fontWeight: 500 }
+          },
+            h(Icon, { name: "person", size: 11 }),
+            h("span", { style: { cursor: "pointer" }, onClick: () => { setView("people"); setFilterTags([]); setSearch(""); setFilterPerson(p); }, title: "Show everything with " + p }, p),
+            h("span", { onClick: () => removePerson(item.id, p), style: { cursor: "pointer", opacity: 0.45, fontSize: 13, lineHeight: 1 }, title: "Remove person" }, "×")
+          )),
+          addingPersonFor === item.id
+            ? h(SuggestInput, { placeholder: "@person…", suggestionsPool: allPeople, exclude: item.people || [], onSubmit: p => addPerson(item.id, p.replace(/^@/, "")), onClose: () => setAddingPersonFor(null), th })
+            : h("button", { className: "ghost-btn", onClick: () => setAddingPersonFor(item.id), style: { color: th.faint, border: "1px dashed " + th.border, borderRadius: 20, padding: "2px 9px", fontSize: 11 } }, "+ @"),
+          item.tags.map(t => h("span", {
+            key: t,
+            style: { display: "inline-flex", alignItems: "center", gap: 4, background: tagColor(t) + "16", color: tagColor(t), borderRadius: 20, padding: "3px 10px", fontSize: 11.5, fontWeight: 500 }
+          },
+            h("span", { style: { cursor: "pointer" }, onClick: () => setFilterTags(prev => toggleIn(prev, t)), title: "Filter by tag" }, t),
+            h("span", { onClick: () => removeTag(item.id, t), style: { cursor: "pointer", opacity: 0.45, fontSize: 13, lineHeight: 1 }, title: "Remove tag" }, "×")
+          )),
+          addingTagFor === item.id
+            ? h(SuggestInput, { placeholder: "tag…", suggestionsPool: visibleTags, exclude: item.tags, onSubmit: tag => addTag(item.id, tag), onClose: () => setAddingTagFor(null), th })
+            : h("button", { className: "ghost-btn", onClick: () => setAddingTagFor(item.id), style: { color: th.faint, border: "1px dashed " + th.border, borderRadius: 20, padding: "2px 9px", fontSize: 11 } }, "+ tag"),
+
+          item.project && showProjectBadge !== false
+            ? h("span", {
+                style: { display: "inline-flex", alignItems: "center", gap: 4, color: th.muted, border: "1px solid " + th.borderStrong, borderRadius: 7, padding: "2px 9px", fontSize: 11.5, fontWeight: 500 }
+              },
+                h("span", { style: { cursor: "pointer" }, onClick: () => { setView("projects"); setFilterTags([]); setSearch(""); }, title: "Show projects" }, "▸ ", item.project),
+                h("span", { onClick: () => setProject(item.id, null), style: { cursor: "pointer", opacity: 0.45, fontSize: 13, lineHeight: 1 }, title: "Detach from project" }, "×")
+              )
+            : !item.project && (addingProjectFor === item.id
+                ? h(SuggestInput, { placeholder: "project…", suggestionsPool: allProjects, exclude: [], onSubmit: p => setProject(item.id, p), onClose: () => setAddingProjectFor(null), th, width: 120 })
+                : h("button", { className: "ghost-btn", onClick: () => setAddingProjectFor(item.id), style: { color: th.faint, border: "1px dashed " + th.border, borderRadius: 7, padding: "2px 9px", fontSize: 11 } }, "+ project"))
+        ),
+
+        editId === item.id && h("div", { style: { display: "flex", gap: 8, marginTop: 10 } },
+          h("button", { onClick: () => saveEdit(item.id), style: { ...primaryBtn, padding: "6px 14px", fontSize: 12.5 } }, "Save"),
+          h("button", { className: "ghost-btn", onClick: () => setEditId(null), style: smallBtn }, "Cancel")
+        ),
+
+        /* GTD clarify row — always visible in Inbox */
+        !item.done && item.status === "inbox" && view === "inbox" && h("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10, alignItems: "center" } },
+          h("span", { style: { fontSize: 10.5, fontWeight: 600, letterSpacing: 0.8, textTransform: "uppercase", color: th.faint, marginRight: 2 } }, "Clarify"),
+          ["next", "waiting", "someday"].map(k => clarifyBtn(item, k)),
+          h("button", { className: "ghost-btn", onClick: () => setSnoozeMenuFor(snoozeMenuFor === item.id ? null : item.id), style: { ...smallBtn, padding: "4px 11px", fontSize: 11.5 },
+            onMouseEnter: e => { e.currentTarget.style.borderColor = th.accent; e.currentTarget.style.color = th.accent; },
+            onMouseLeave: e => { e.currentTarget.style.borderColor = th.border; e.currentTarget.style.color = th.muted; }
+          }, "Snooze"),
+          h("button", { className: "ghost-btn", onClick: () => toggle(item.id), title: "2-minute rule: done right away", style: { ...smallBtn, padding: "4px 11px", fontSize: 11.5, color: th.green, borderColor: th.green + "55" } }, "✓ Done")
+        ),
+
+        /* Quick snooze — always visible on Next, the daily "not today" decision.
+           One click, no menu. "More…" opens the full menu with custom days/date. */
+        !item.done && view === "next" && !isSnoozed(item) && snoozeMenuFor !== item.id && editId !== item.id && h("div", { style: { display: "flex", flexWrap: "wrap", gap: 5, marginTop: compact ? 6 : 10, alignItems: "center" } },
+          h("span", { style: { fontSize: 10, fontWeight: 600, letterSpacing: 0.8, textTransform: "uppercase", color: th.faint, marginRight: 2, display: "inline-flex", alignItems: "center", gap: 4 } }, h(Icon, { name: "clock", size: 10 }), "Not today"),
+          SNOOZE_OPTIONS.slice(0, 3).map(o => h("button", { key: o.label, className: "ghost-btn", onClick: () => snooze(item.id, o.days), title: "Snooze until " + fmtDay(snoozeUntil(o.days)), style: { ...smallBtn, padding: "2px 9px", fontSize: 11 },
+            onMouseEnter: e => { e.currentTarget.style.borderColor = th.accent; e.currentTarget.style.color = th.accent; },
+            onMouseLeave: e => { e.currentTarget.style.borderColor = th.border; e.currentTarget.style.color = th.muted; }
+          }, o.label)),
+          h("button", { className: "ghost-btn", onClick: () => setSnoozeMenuFor(item.id), style: { background: "none", border: "none", color: th.faint, fontSize: 11, cursor: "pointer", padding: "2px 4px" } }, "more…"),
+          item.snoozeCount >= 2 && h("span", { title: "Snoozed " + item.snoozeCount + " times — still worth doing?", style: { marginLeft: "auto", fontSize: 10.5, color: item.snoozeCount >= POSTPONED_MANY ? th.warnText : th.faint, fontWeight: item.snoozeCount >= POSTPONED_MANY ? 600 : 400 } }, "postponed " + item.snoozeCount + "×")
+        ),
+        /* postponed badge everywhere else (Snoozed view, search, projects…) */
+        !item.done && item.snoozeCount >= POSTPONED_MANY && !(view === "next" && !isSnoozed(item) && snoozeMenuFor !== item.id && editId !== item.id) && h("div", { style: { marginTop: 6, fontSize: 10.5, color: th.warnText, fontWeight: 600 }, title: "Snoozed " + item.snoozeCount + " times — still worth doing?" }, "postponed " + item.snoozeCount + "×"),
+
+        /* Waiting age + ping */
+        !item.done && item.status === "waiting" && waitingDays(item) !== null && h("div", { style: { display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8, alignItems: "center", fontSize: 12 } },
+          h("span", { style: { display: "inline-flex", alignItems: "center", gap: 5, color: waitingDays(item) >= WAITING_WARN_DAYS ? th.warnText : th.muted, fontWeight: waitingDays(item) >= WAITING_WARN_DAYS ? 600 : 400,
+                              background: waitingDays(item) >= WAITING_WARN_DAYS ? th.warnBg : "transparent", border: "1px solid " + (waitingDays(item) >= WAITING_WARN_DAYS ? th.warnBorder : "transparent"), borderRadius: 12, padding: "1px 9px" },
+              title: item.lastPingAt ? "Since your last ping on " + fmtDay(item.lastPingAt) : "Since the task was created" },
+            "waiting " + (waitingDays(item) === 0 ? "since today" : waitingDays(item) + (waitingDays(item) === 1 ? " day" : " days")),
+            item.pingCount > 0 && h("span", { style: { opacity: 0.7 } }, "· pinged " + item.pingCount + "×")),
+          h("button", { className: "ghost-btn", onClick: () => ping(item.id), title: "Log a nudge (adds “Pinged <date>” to the note), restart the clock and hide for a week",
+            style: { ...smallBtn, padding: "2px 10px", fontSize: 11, color: th.accent, borderColor: th.accent + "66" } }, "Ping → hide 1 week")
+        ),
+
+        /* move menu */
+        moveMenuFor === item.id && h("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10, alignItems: "center" } },
+          h("span", { style: { fontSize: 12, color: th.muted } }, "Move to:"),
+          STATUS_KEYS.filter(k => k !== item.status).map(k => clarifyBtn(item, k)),
+          h("button", { className: "ghost-btn", onClick: () => setMoveMenuFor(null), style: { background: "none", border: "none", color: th.faint, fontSize: 12, cursor: "pointer" } }, "Cancel")
+        ),
+
+        !item.done && isRecurring(item) && h("div", {
+          onClick: () => setRepeatMenuFor(repeatMenuFor === item.id ? null : item.id),
+          title: "Change recurrence · next occurrence " + fmtDay(nextOccurrence(item)),
+          style: { display: "flex", alignItems: "center", gap: 7, marginTop: 8, fontSize: 12, color: th.accent, cursor: "pointer" }
+        }, h(Icon, { name: "repeat", size: 12 }), "Repeats ", recurrenceLabel(item)),
+        repeatMenuFor === item.id && h("div", { style: { marginTop: 8, display: "flex", flexDirection: "column", gap: 8 } },
+          h("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" } },
+            h("span", { style: { fontSize: 12, color: th.muted, minWidth: 118 } }, "After completion:"),
+            REPEAT_OPTIONS.map(o => h("button", { key: o.label, className: "ghost-btn", onClick: () => setRepeat(item.id, o.days), style: { ...smallBtn, padding: "4px 11px", fontSize: 11.5, ...(item.repeatMode !== "weekly" && item.repeatMode !== "monthly" && item.repeatDays === o.days ? { borderColor: th.accent, color: th.accent } : {}) } }, o.label))),
+          h("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" } },
+            h("span", { style: { fontSize: 12, color: th.muted, minWidth: 118 } }, "Fixed weekday:"),
+            [1, 2, 3, 4, 5, 6, 0].map(wd => h("button", { key: wd, className: "ghost-btn", onClick: () => setRepeatWeekly(item.id, wd), title: "Every " + WEEKDAYS[wd], style: { ...smallBtn, padding: "4px 9px", fontSize: 11.5, ...(item.repeatMode === "weekly" && item.repeatWeekday === wd ? { borderColor: th.accent, color: th.accent } : {}) } }, WEEKDAYS[wd].slice(0, 3)))),
+          h("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" } },
+            h("span", { style: { fontSize: 12, color: th.muted, minWidth: 118 } }, "Fixed day of month:"),
+            h("input", {
+              type: "number", min: 1, max: 31, placeholder: "1–31", defaultValue: item.repeatMode === "monthly" ? item.repeatDom : "",
+              onKeyDown: e => { if (e.key === "Enter") setRepeatMonthly(item.id, Math.round(+e.target.value)); if (e.key === "Escape") setRepeatMenuFor(null); },
+              onBlur: e => { const v = Math.round(+e.target.value); if (v >= 1 && v <= 31 && !(item.repeatMode === "monthly" && item.repeatDom === v)) setRepeatMonthly(item.id, v); },
+              style: { width: 62, padding: "3px 8px", fontSize: 11.5, border: "1px solid " + (item.repeatMode === "monthly" ? th.accent : th.border), borderRadius: 8, outline: "none", background: th.inputBg, color: th.text }
+            }),
+            h("span", { style: { fontSize: 11, color: th.faint } }, "e.g. 10 = every month on the 10th (Enter to set)"),
+            h("span", { style: { flex: 1 } }),
+            isRecurring(item) && h("button", { className: "ghost-btn", onClick: () => clearRepeat(item.id), style: { ...smallBtn, padding: "4px 11px", fontSize: 11.5, color: th.danger, borderColor: th.danger + "55" } }, "Off"),
+            h("button", { className: "ghost-btn", onClick: () => setRepeatMenuFor(null), style: { background: "none", border: "none", color: th.faint, fontSize: 12, cursor: "pointer" } }, "Cancel"))
+        ),
+        isSnoozed(item) && h("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 8, fontSize: 12, color: th.muted } },
+          h(Icon, { name: "clock", size: 13 }),
+          h("span", null, "Hidden until ", fmtSnoozeTs(item.snoozedUntil)),
+          h("button", { className: "ghost-btn", onClick: () => unsnooze(item.id), style: { ...smallBtn, padding: "3px 10px", fontSize: 11.5, color: th.accent, borderColor: th.accent + "66" } }, "Unsnooze")
+        ),
+        snoozeMenuFor === item.id && h("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8, alignItems: "center" } },
+          h("span", { style: { fontSize: 12, color: th.muted } }, "Snooze for:"),
+          SNOOZE_OPTIONS.map(o => h("button", { key: o.label, className: "ghost-btn", onClick: () => snooze(item.id, o.days), style: { ...smallBtn, padding: "4px 11px", fontSize: 11.5 } }, o.label)),
+          /* custom: N days */
+          h("span", { style: { display: "inline-flex", alignItems: "center", gap: 4, marginLeft: 4 } },
+            h("input", {
+              type: "number", min: 1, max: 999, value: customDays, placeholder: "N",
+              onChange: e => setCustomDays(e.target.value),
+              onKeyDown: e => { if (e.key === "Enter" && +customDays > 0) { snooze(item.id, Math.round(+customDays)); setCustomDays(""); } if (e.key === "Escape") setSnoozeMenuFor(null); },
+              title: "Snooze for a custom number of days",
+              style: { width: 52, padding: "3px 8px", fontSize: 11.5, border: "1px solid " + th.border, borderRadius: 8, outline: "none", background: th.inputBg, color: th.text }
+            }),
+            h("span", { style: { fontSize: 11.5, color: th.muted } }, "days"),
+            h("button", { className: "ghost-btn", disabled: !(+customDays > 0), onClick: () => { snooze(item.id, Math.round(+customDays)); setCustomDays(""); },
+              style: { ...smallBtn, padding: "4px 10px", fontSize: 11.5, color: +customDays > 0 ? th.accent : th.faint, borderColor: +customDays > 0 ? th.accent + "66" : th.border, cursor: +customDays > 0 ? "pointer" : "default" } }, "Go")),
+          /* custom: specific date */
+          h("span", { style: { display: "inline-flex", alignItems: "center", gap: 4 } },
+            h("span", { style: { fontSize: 11.5, color: th.muted } }, "or until"),
+            h("input", {
+              type: "date", value: customDate, min: fmtDay(Date.now() + 864e5),
+              onChange: e => { setCustomDate(e.target.value); if (e.target.value) { snoozeToDate(item.id, e.target.value); setCustomDate(""); } },
+              title: "Snooze until a specific date",
+              style: { padding: "2px 8px", fontSize: 11.5, border: "1px solid " + th.border, borderRadius: 8, outline: "none", background: th.inputBg, color: th.text, colorScheme: dark ? "dark" : "light" }
+            })),
+          h("button", { className: "ghost-btn", onClick: () => setSnoozeMenuFor(null), style: { background: "none", border: "none", color: th.faint, fontSize: 12, cursor: "pointer" } }, "Cancel")
+        ),
+
+        !compact && item.note && editNoteId !== item.id && h("div", {
+          onClick: () => startNote(item),
+          style: { marginTop: 10, fontSize: 12.5, color: th.muted, background: th.hover, borderRadius: 8, padding: "8px 11px", whiteSpace: "pre-wrap", overflowWrap: "anywhere", cursor: "text", lineHeight: 1.5 },
+          title: "Click to edit the note"
+        }, linkify(item.note, th.accent)),
+        editNoteId === item.id && h("div", { style: { marginTop: 10 } },
+          h("textarea", {
+            autoFocus: true, value: noteDraft, onChange: e => setNoteDraft(e.target.value),
+            onKeyDown: e => { if (e.key === "Escape") setEditNoteId(null); if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) saveNote(item.id); },
+            placeholder: "Note… (Ctrl/Cmd+Enter to save)", rows: 3,
+            style: { width: "100%", padding: "8px 11px", fontSize: 13, border: "1px solid " + th.accent, borderRadius: 8, outline: "none", boxSizing: "border-box", background: th.inputBg, color: th.text, resize: "vertical", lineHeight: 1.5 }
+          }),
+          h("div", { style: { display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" } },
+            h("button", { onClick: () => saveNote(item.id), style: { ...primaryBtn, padding: "6px 14px", fontSize: 12.5 } }, "Save note"),
+            h("button", { className: "ghost-btn", onClick: () => setEditNoteId(null), style: smallBtn }, "Cancel"),
+            item.note && h("button", { className: "ghost-btn", onClick: () => deleteNote(item.id), style: { ...smallBtn, color: th.danger, borderColor: th.danger + "55" } }, "Delete note")
+          )
+        ),
+
+        !compact && (item.createdAt || item.modifiedAt || item.doneAt) && h("div", { style: { display: "flex", gap: 14, marginTop: 8, fontSize: 10.5, color: th.timestamp, flexWrap: "wrap" } },
+          item.createdAt && h("span", { title: "Created" }, "created ", fmtDate(item.createdAt)),
+          item.modifiedAt && h("span", { title: "Modified" }, "edited ", fmtDate(item.modifiedAt)),
+          item.doneAt && h("span", { title: "Completed", style: { color: th.green } }, "done ", fmtDate(item.doneAt))
+        )
+      )
+    )
+  );
+
+  /* ---------------- weekly review ---------------- */
+  const reviewSteps = [
+    { label: "Empty the Inbox", count: listCount("inbox"), goto: "inbox", ok: listCount("inbox") === 0 },
+    { label: "Review Next actions", count: listCount("next"), goto: "next", ok: true },
+    { label: "Review Waiting — anything to chase?", count: listCount("waiting"), goto: "waiting", ok: true },
+    { label: "Projects without a next action", count: projectsWithoutNext.length, goto: "projects", ok: projectsWithoutNext.length === 0 },
+    areaTags.length > 0 && { label: "Review areas \u2014 anything slipping?", count: neglectedAreas.length, goto: "areas", ok: neglectedAreas.length === 0 },
+    { label: "Review Someday / Maybe — anything to activate?", count: listCount("someday"), goto: "someday", ok: true },
+    { label: "Check snoozed items", count: snoozedCount, goto: "snoozed", ok: true },
+    { label: "Often postponed \u2014 still worth doing?", count: postponedCount, goto: "postponed", ok: postponedCount === 0 },
+    { label: "Process the brain dump", count: brainDump.trim() ? 1 : 0, goto: null, ok: !brainDump.trim() }
+  ];
+
+  const viewTabs = [
+    { key: "inbox",     label: "Inbox",    count: listCount("inbox") },
+    { key: "next",      label: "Next",     count: listCount("next") },
+    { key: "waiting",   label: "Waiting",  count: listCount("waiting") },
+    { key: "someday",   label: "Someday",  count: listCount("someday") },
+    { key: "projects",  label: "Projects", count: allProjects.filter(p => active.some(i => i.project === p)).length },
+    { key: "people",    label: "People",   count: activePeople.length },
+    { key: "areas",     label: "Areas",    count: areaTags.length },
+    { key: "snoozed",   label: "Snoozed",  count: snoozedCount },
+    { key: "doneToday", label: "Today",    count: stats.completedToday },
+    { key: "done",      label: "Archive",  count: stats.totalDone }
+  ];
+
+  const addPlaceholder = view === "inbox" ? "Capture anything…  #tag  +project  @person  #w8  ^3d"
+    : STATUS_KEYS.includes(view) ? "Add to " + STATUSES[view].label + "…  #tag  +project  @person"
+    : "Capture to Inbox…  #tag  +project  @person";
+
+  /* ---- token autocomplete in the capture bar ----
+     While the trailing token is an unterminated #tag, +project or @person
+     (quoted or bare), suggest existing names; picking one inserts it properly
+     quoted. For # the routing shortcuts are offered too. */
+  const ROUTE_SUGGESTIONS = ["w8", "next", "someday"];
+  const tokenCtx = (() => {
+    const m = input.match(/(?:^|\s)([#+@])(?:"([^"]*)|'([^']*)|([^\s"']*))$/);
+    if (!m) return null;
+    const partial = (m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : m[4] || "");
+    const pool = m[1] === "#" ? visibleTags.concat(ROUTE_SUGGESTIONS) : m[1] === "@" ? allPeople : allProjects;
+    const pl = partial.toLowerCase();
+    const suggestions = pool.filter(n => n.toLowerCase().includes(pl)).slice(0, 7);
+    if (!suggestions.length) return null;
+    const start = m.index + (/\s/.test(m[0][0]) ? 1 : 0);
+    return { sym: m[1], partial, suggestions, start };
+  })();
+  const completeToken = name => {
+    if (!tokenCtx) return;
+    const quoted = /\s/.test(name) ? '"' + name + '"' : name;
+    setInput(input.slice(0, tokenCtx.start) + tokenCtx.sym + quoted + " ");
+    captureRef.current?.focus();
+  };
+  const captureRef = React.useRef();
+
+  /* ---- live duplicate detection while typing a new task ---- */
+  const similarTasks = (() => {
+    const q = parseInput(input).clean.toLowerCase().trim();
+    if (q.length < 3) return [];
+    const tokens = q.split(/\s+/).filter(w => w.length >= 3);
+    const tokenHits = (txt, words, t) =>
+      txt.includes(t) || words.some(w => w.startsWith(t) || t.startsWith(w));
+    return items
+      .map(i => {
+        const txt = i.text.toLowerCase();
+        const words = txt.split(/[^\p{L}\p{N}]+/u).filter(w => w.length >= 3);
+        let score = 0;
+        tokens.forEach(t => { if (tokenHits(txt, words, t)) score++; });
+        if (txt.includes(q)) score += 3;
+        else if (i.note && i.note.toLowerCase().includes(q)) score += 1;
+        return { item: i, score, exact: q.length >= 5 && txt.includes(q) };
+      })
+      .filter(r => r.score > 0)
+      .sort((a, b) => b.score - a.score || (b.item.modifiedAt || b.item.createdAt || 0) - (a.item.modifiedAt || a.item.createdAt || 0))
+      .slice(0, 5);
+  })();
+  const taskHome = i => i.done ? (isToday(i.doneAt) ? "doneToday" : "done") : (isSnoozed(i) ? "snoozed" : i.status);
+  const taskHomeLabel = i => i.done ? "Done" : (isSnoozed(i) ? "Snoozed" : STATUSES[i.status].label);
+  const goToSimilar = i => {
+    setView(taskHome(i)); setFilterTags([]);
+    setSearch(parseInput(input).clean.trim());
+  };
+
+  const sectionToggle = (label, open, setOpen, extra) => h("button", {
+    className: "ghost-btn", onClick: () => setOpen(!open),
+    style: { display: "flex", alignItems: "center", gap: 7, background: "none", border: "none", padding: "4px 0", fontSize: 12, fontWeight: 600, letterSpacing: 0.6, textTransform: "uppercase", color: th.faint, cursor: "pointer" }
+  }, h("span", { style: { transform: open ? "rotate(90deg)" : "none", display: "inline-flex", transition: "transform 0.15s" } }, h(Icon, { name: "chevR", size: 12 })), label, extra);
+
+  return h("div", { style: { maxWidth: 1120, margin: "0 auto", padding: "40px 24px 64px", color: th.text } },
+
+    /* ---------- Header ---------- */
+    h("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 28, flexWrap: "wrap", gap: 12 } },
+      h("div", { style: { display: "flex", alignItems: "baseline", gap: 12 } },
+        h("h1", { style: { fontSize: 24, fontWeight: 700, letterSpacing: -0.5 } }, "todo", h("span", { style: { color: th.accent } }, ".")),
+        h("span", { style: { fontSize: 10.5, fontWeight: 600, color: th.faint, letterSpacing: 2, textTransform: "uppercase" } }, "Getting things done")
+      ),
+      h("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } },
+        saved === "ok" && !storageBroken && fileState !== "on" && h("span", { style: { fontSize: 11.5, color: th.green, display: "inline-flex", alignItems: "center", gap: 4 } }, h(Icon, { name: "check", size: 12 }), "saved"),
+        fileState === "on" && h("span", { style: { fontSize: 11.5, color: th.green, display: "inline-flex", alignItems: "center", gap: 4 }, title: "Every change is written to this file" }, h(Icon, { name: "check", size: 12 }), "auto-saving to ", fileName),
+        fileState === "error" && h("span", { style: { fontSize: 11.5, color: th.danger, fontWeight: 600 } }, "file save failed — click Resume in the banner"),
+        saved === "ok" && storageBroken && fileState === "off" && h("span", { style: { fontSize: 11.5, color: th.warnText } }, "in memory only"),
+        saved === "fail" && h("span", { style: { fontSize: 11.5, color: th.danger, fontWeight: 600 } }, "not saved"),
+        /* sync status + toggle */
+        syncUI.status === "error" && h("span", { style: { fontSize: 11.5, color: th.danger, fontWeight: 600, cursor: "pointer" }, onClick: () => setShowSync(true), title: syncUI.msg }, "sync error"),
+        syncUI.status === "syncing" && h("span", { style: { fontSize: 11.5, color: th.muted } }, "syncing…"),
+        syncUI.status === "idle" && syncUI.lastAt && h("span", { style: { fontSize: 11.5, color: th.green, display: "inline-flex", alignItems: "center", gap: 4 }, title: "Last sync " + fmtDate(syncUI.lastAt) + (syncCfg && syncCfg.pass ? " · encrypted" : "") }, h(Icon, { name: syncCfg && syncCfg.pass ? "lock" : "cloud", size: 12 }), "synced"),
+        h("button", { className: "ghost-btn", onClick: () => setShowSync(!showSync), style: ghost(showSync || !!syncCfg), title: syncCfg ? "Sync settings" : "Set up sync via a GitHub gist" },
+          h(Icon, { name: "cloud", size: 13 }), "Sync"),
+        h("button", { className: "ghost-btn", onClick: () => setShowReview(!showReview), style: ghost(showReview), title: "Weekly review" },
+          h(Icon, { name: "refresh", size: 13 }), "Review"),
+        view !== "projects" && view !== "people" && view !== "areas" && h("button", { className: "ghost-btn", onClick: () => setGroupByTag(!groupByTag), style: ghost(groupByTag), title: "Group by tag" },
+          h(Icon, { name: "tag", size: 13 }), "Group"),
+        h("button", { className: "ghost-btn", onClick: () => setCompact(!compact), style: ghost(compact), title: compact ? "Comfortable view" : "Compact view" },
+          h(Icon, { name: compact ? "grid" : "rows", size: 13 }), compact ? "Cozy" : "Compact"),
+        h("button", { className: "icon-btn", onClick: () => setDark(!dark), title: dark ? "Light mode" : "Dark mode",
+          style: { color: th.muted, border: "1px solid " + th.border, borderRadius: 8, padding: 7 },
+          onMouseEnter: e => e.currentTarget.style.background = th.hover,
+          onMouseLeave: e => e.currentTarget.style.background = "transparent"
+        }, h(Icon, { name: dark ? "sun" : "moon", size: 14 }))
+      )
+    ),
+
+    /* ---------- Storage warning ---------- */
+    storageBroken && fileState !== "on" && h("div", { style: { display: "flex", gap: 12, alignItems: "flex-start", background: th.warnBg, border: "1px solid " + th.warnBorder, borderRadius: 12, padding: "13px 16px", marginBottom: 24 } },
+      h("span", { style: { color: th.warnText, marginTop: 1 } }, h(Icon, { name: "clock", size: 15 })),
+      h("div", { style: { fontSize: 12.5, lineHeight: 1.6, color: th.warnText } },
+        h("strong", null, store.volatile
+          ? (isQuotaIssue() ? "Browser storage for local files is full. " : "Browser storage is blocked, so changes will not survive a reload. ")
+          : "Saving to browser storage failed. "),
+        store.volatile
+          ? (isQuotaIssue()
+              ? "All local HTML files on this computer share one small storage pool (usually 5\u201310 MB) and something has filled it. Your existing data is still readable \u2014 free up space below, or switch to file auto-save."
+              : "Common causes: cookies / site data set to \u201CBlock all\u201D in the browser settings, a strict private or incognito window, Brave shields, an ad-blocker in aggressive mode, or a company policy.")
+          : "Storage may be full or blocked by your browser settings.",
+        h("div", { style: { marginTop: 6, fontSize: 11.5, opacity: 0.85, fontFamily: "ui-monospace, monospace" } }, "Diagnostics: ", storageDiag()),
+        h("div", { style: { marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" } },
+          isQuotaIssue() && store.readable && h("button", { className: "ghost-btn", onClick: () => { refreshInspector(); setShowInspector(!showInspector); }, style: { background: th.warnText, border: "1px solid " + th.warnText, color: th.warnBg, borderRadius: 8, padding: "6px 13px", fontSize: 12, fontWeight: 600, cursor: "pointer" } },
+            showInspector ? "Hide storage inspector" : "Inspect \u0026 free up storage\u2026"),
+          h("button", { className: "ghost-btn", onClick: () => { if (!retestStorage()) refreshInspector(); }, style: { background: "transparent", border: "1px solid " + th.warnBorder, color: th.warnText, borderRadius: 8, padding: "6px 13px", fontSize: 12, fontWeight: 600, cursor: "pointer" } },
+            "Re-test storage"),
+          fsSupported && h("button", { className: "ghost-btn", onClick: enableFileAutosave, style: { background: "transparent", border: "1px solid " + th.warnBorder, color: th.warnText, borderRadius: 8, padding: "6px 13px", fontSize: 12, fontWeight: 600, cursor: "pointer" } },
+            "Auto-save to a file\u2026"),
+          fsSupported && h("button", { className: "ghost-btn", onClick: resumeFromFile, style: { background: "transparent", border: "1px solid " + th.warnBorder, color: th.warnText, borderRadius: 8, padding: "6px 13px", fontSize: 12, fontWeight: 600, cursor: "pointer" } },
+            "Resume from my file\u2026"),
+          h("button", { className: "ghost-btn", onClick: exportJSON, style: { background: "transparent", border: "1px solid " + th.warnBorder, color: th.warnText, borderRadius: 8, padding: "6px 13px", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 } },
+            h(Icon, { name: "download", size: 12 }), "Export JSON")),
+        /* ---- storage inspector: what occupies the shared file:// pool ---- */
+        showInspector && h("div", { style: { marginTop: 12, background: th.card, border: "1px solid " + th.warnBorder, borderRadius: 10, padding: "10px 12px" } },
+          h("div", { style: { fontSize: 11.5, color: th.muted, marginBottom: 8 } },
+            "Total used: ", h("strong", { style: { color: th.text } }, fmtBytes(storageEntries.reduce((a, e) => a + e.bytes, 0))),
+            " across ", storageEntries.length, " keys. Deleting a key frees space immediately; the app re-tests storage after each deletion."),
+          storageEntries.length === 0 && h("div", { style: { fontSize: 12, color: th.muted } }, "Nothing readable here \u2014 the pool may be occupied by other storage types this page can\u2019t list."),
+          storageEntries.map(e => {
+            const mine = e.key === STORAGE_KEY || e.key.startsWith("todo_");
+            return h("div", { key: e.key, style: { display: "flex", alignItems: "center", gap: 10, padding: "5px 4px", borderTop: "1px solid " + th.border, fontSize: 12 } },
+              h("span", { style: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: th.text, fontFamily: "ui-monospace, monospace" }, title: e.key }, e.key,
+                mine && h("span", { style: { color: th.green, marginLeft: 8, fontFamily: "Inter, system-ui, sans-serif", fontSize: 10.5, fontWeight: 600 } }, "this app")),
+              h("span", { style: { color: th.muted, flexShrink: 0, minWidth: 64, textAlign: "right" } }, fmtBytes(e.bytes)),
+              e.key !== STORAGE_KEY && h("button", { className: "ghost-btn", onClick: () => deleteStorageKey(e.key), style: { border: "1px solid " + th.danger + "55", color: th.danger, borderRadius: 6, padding: "2px 10px", fontSize: 11, cursor: "pointer", background: "transparent", flexShrink: 0 } }, "Delete"))
+          })
+        ),
+        h("div", { style: { marginTop: 8, fontSize: 11.5, opacity: 0.85 } },
+          fsSupported
+            ? "\u201CAuto-save to a file\u201D writes every change straight to a JSON file on your disk \u2014 pick it once now, and next time open the app and click \u201CResume from my file\u201D."
+            : "This browser doesn\u2019t support direct file auto-save \u2014 use Export JSON to save and Import JSON to restore.")
+      )
+    ),
+
+    /* ---------- Sync settings ---------- */
+    showSync && (() => {
+      const field = (label, key, type, placeholder, hint) => h("label", { style: { display: "flex", flexDirection: "column", gap: 4, fontSize: 12, color: th.muted, flex: "1 1 220px" } },
+        label,
+        h("input", { type, value: syncForm[key], placeholder, autoComplete: "off", spellCheck: false,
+          onChange: e => setSyncForm(f => ({ ...f, [key]: e.target.value })),
+          onKeyDown: e => { if (e.key === "Enter") connectSync(); },
+          style: { padding: "8px 11px", fontSize: 13, border: "1px solid " + th.border, borderRadius: 9, outline: "none", background: th.inputBg, color: th.text, fontFamily: key === "pass" ? "inherit" : "ui-monospace, monospace" } }),
+        hint && h("span", { style: { fontSize: 11, color: th.faint, lineHeight: 1.4 } }, hint));
+      const dirty = !syncCfg || syncForm.token.trim() !== syncCfg.token || syncForm.gistId.trim() !== syncCfg.gistId || syncForm.pass !== (syncCfg.pass || "");
+      return h("div", { style: { background: th.card, border: "1px solid " + th.border, borderRadius: 14, padding: "18px 20px", marginBottom: 24, boxShadow: th.shadow } },
+        h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, flexWrap: "wrap", gap: 8 } },
+          h("span", { style: { fontSize: 14, fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 8 } }, h(Icon, { name: "cloud", size: 15 }), "Sync via GitHub gist"),
+          syncCfg && h("span", { style: { fontSize: 11.5, color: th.faint } }, syncUI.lastAt ? "last sync " + fmtDate(syncUI.lastAt) : "not synced yet")),
+        h("p", { style: { fontSize: 12.5, color: th.muted, lineHeight: 1.6, marginBottom: 14, maxWidth: 720 } },
+          "Your tasks are stored in a secret gist on your GitHub account and merged across devices. ",
+          h("strong", null, "A secret gist is not private"), " — anyone with its URL can read it — so set a passphrase: the gist then holds only encrypted data, and the passphrase never leaves this browser. ",
+          "The token and passphrase are remembered in this browser only; on another device, enter the same token, gist ID and passphrase."),
+        h("div", { style: { display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 12 } },
+          field("GitHub token (classic, scope: gist)", "token", "password", "ghp_…", "github.com → Settings → Developer settings → Personal access tokens → Tokens (classic). Fine-grained tokens cannot access gists."),
+          field("Gist ID", "gistId", "text", "leave empty to create a new gist", "Shown here after the first connect — copy it to your other devices."),
+          field("Passphrase (recommended)", "pass", "password", "encrypts the gist", "Choose once; the same passphrase on every device. No recovery if you forget it — export a JSON backup.")),
+        syncUI.status === "error" && h("div", { style: { fontSize: 12.5, color: th.danger, background: th.dangerBg, border: "1px solid " + th.danger + "44", borderRadius: 9, padding: "8px 12px", marginBottom: 12, lineHeight: 1.5 } }, syncUI.msg),
+        h("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" } },
+          h("button", { onClick: connectSync, disabled: syncUI.status === "syncing", style: { ...primaryBtn, opacity: syncUI.status === "syncing" ? 0.6 : 1 } },
+            syncUI.status === "syncing" ? "Working…" : syncCfg && !dirty ? "Sync now" : syncForm.gistId.trim() ? "Connect" : "Create gist & connect"),
+          syncCfg && dirty && h("button", { className: "ghost-btn", onClick: () => setSyncForm({ token: syncCfg.token, gistId: syncCfg.gistId, pass: syncCfg.pass || "" }), style: smallBtn }, "Revert changes"),
+          syncCfg && h("button", { className: "ghost-btn", onClick: () => { if (confirm("Disconnect sync on this device? Your tasks stay here and in the gist; only the connection is forgotten.")) disconnectSync(); }, style: { ...smallBtn, color: th.danger, borderColor: th.danger + "55" } }, "Disconnect"),
+          syncCfg && syncCfg.gistId && h("a", { href: "https://gist.github.com/" + syncCfg.gistId, target: "_blank", rel: "noopener noreferrer", style: { fontSize: 12, color: th.accent, marginLeft: "auto" } }, "open gist ↗"),
+          h("button", { className: "ghost-btn", onClick: () => setShowSync(false), style: { background: "none", border: "none", color: th.faint, fontSize: 12, cursor: "pointer" } }, "Close"))
+      );
+    })(),
+
+    /* ---------- Weekly review ---------- */
+    showReview && h("div", { style: { background: th.card, border: "1px solid " + th.border, borderRadius: 14, padding: "18px 20px", marginBottom: 24, boxShadow: th.shadow } },
+      h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 } },
+        h("span", { style: { fontSize: 14, fontWeight: 600 } }, "Weekly review"),
+        h("span", { style: { fontSize: 11.5, color: lastReview && daysAgo(lastReview) > 7 ? th.warnText : th.faint } },
+          lastReview ? "Last review " + fmtDay(lastReview) + " · " + daysAgo(lastReview) + " days ago" : "No review yet")
+      ),
+      reviewSteps.filter(Boolean).map((s, idx) => h("div", {
+        key: idx,
+        onClick: () => { if (s.goto) { setView(s.goto); setFilterTags([]); setSearch(""); } if (s.goto === null && s.count) setShowBrainDump(true); },
+        style: { display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 8, cursor: s.goto || s.count ? "pointer" : "default", fontSize: 13.5 },
+        onMouseEnter: e => e.currentTarget.style.background = th.hover,
+        onMouseLeave: e => e.currentTarget.style.background = "transparent"
+      },
+        h("span", { style: { width: 18, display: "inline-flex", justifyContent: "center", color: s.ok && s.count === 0 ? th.green : th.faint } },
+          h(Icon, { name: s.ok && s.count === 0 ? "check" : "chevR", size: 13 })),
+        h("span", { style: { flex: 1, color: th.text } }, s.label),
+        s.count > 0 && h("span", {
+          style: { fontSize: 11, fontWeight: 600, color: s.ok ? th.muted : th.warnText, background: s.ok ? th.hover : th.warnBg, border: "1px solid " + (s.ok ? th.border : th.warnBorder), borderRadius: 12, padding: "1px 9px", minWidth: 24, textAlign: "center" }
+        }, s.count)
+      )),
+      h("div", { style: { display: "flex", justifyContent: "flex-end", marginTop: 10 } },
+        h("button", { onClick: () => { setLastReview(Date.now()); setShowReview(false); }, style: primaryBtn }, "Finish review"))
+    ),
+
+    /* ---------- View tabs ---------- */
+    h("div", { style: { display: "flex", flexWrap: "wrap", gap: 2, marginBottom: 24, borderBottom: "1px solid " + th.border, paddingBottom: 0 } },
+      viewTabs.map(v => h("button", {
+        key: v.key, className: "ghost-btn",
+        onClick: () => { setView(v.key); setFilterTags([]); setFilterPerson(null); setSearch(""); },
+        style: {
+          background: "none", border: "none", borderBottom: "2px solid " + (view === v.key ? th.accent : "transparent"),
+          borderRadius: 0, padding: "9px 13px", fontSize: 13.5, cursor: "pointer",
+          fontWeight: view === v.key ? 600 : 450,
+          color: view === v.key ? th.text : th.muted, marginBottom: -1, display: "inline-flex", alignItems: "center", gap: 7
+        }
+      }, v.label, v.count > 0 && h("span", { style: { fontSize: 10.5, fontWeight: 600, color: view === v.key ? th.accent : th.faint, background: view === v.key ? th.accent + "16" : th.hover, borderRadius: 10, padding: "1px 7px" } }, v.count)))
+    ),
+
+    /* ---------- Capture bar ---------- */
+    (STATUS_KEYS.includes(view) || view === "projects" || view === "people") && h("div", { style: { marginBottom: view === "inbox" ? 10 : 24 } },
+      h("div", { style: { display: "flex", gap: 10, background: th.card, border: "1px solid " + th.border, borderRadius: 12, padding: 6, boxShadow: th.shadow, alignItems: "center" } },
+        h("span", { style: { color: th.faint, paddingLeft: 10, display: "inline-flex" } }, h(Icon, { name: "inboxAdd", size: 16 })),
+        h("input", {
+          ref: captureRef,
+          value: input, onChange: e => setInput(e.target.value),
+          onKeyDown: e => {
+            if (e.key === "Tab" && tokenCtx) { e.preventDefault(); completeToken(tokenCtx.suggestions[0]); return; }
+            if (e.key === "Enter" && !tokenCtx) add();
+            else if (e.key === "Enter" && tokenCtx && tokenCtx.partial === "") { e.preventDefault(); completeToken(tokenCtx.suggestions[0]); }
+            else if (e.key === "Enter") add();
+          },
+          placeholder: addPlaceholder, autoFocus: true,
+          style: { flex: 1, padding: "9px 4px", fontSize: 14, border: "none", outline: "none", background: "transparent", color: th.text }
+        }),
+        h("button", { onClick: add, style: primaryBtn }, "Add")
+      ),
+      /* tag / project suggestions for the token being typed */
+      tokenCtx && h("div", { style: { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginTop: 8, padding: "8px 12px", background: th.card, border: "1px solid " + th.border, borderRadius: 12, boxShadow: th.shadow } },
+        h("span", { style: { fontSize: 10.5, fontWeight: 600, letterSpacing: 0.6, textTransform: "uppercase", color: th.faint, marginRight: 2 } },
+          tokenCtx.sym === "#" ? "tag" : tokenCtx.sym === "@" ? "person" : "project"),
+        tokenCtx.suggestions.map(n => {
+          const isRoute = tokenCtx.sym === "#" && ROUTE_TOKENS[n.toLowerCase()];
+          return h("button", {
+            key: n, className: "ghost-btn",
+            onMouseDown: e => { e.preventDefault(); completeToken(n); },
+            title: isRoute ? "Send straight to " + STATUSES[ROUTE_TOKENS[n.toLowerCase()]].label : undefined,
+            style: isRoute
+              ? { fontSize: 11.5, fontWeight: 600, borderRadius: 20, padding: "3px 11px", cursor: "pointer", background: th.accent + "14", color: th.accent, border: "1px dashed " + th.accent + "66" }
+              : tokenCtx.sym === "#"
+              ? { fontSize: 11.5, fontWeight: 500, borderRadius: 20, padding: "3px 11px", cursor: "pointer", background: tagColor(n) + "16", color: tagColor(n), border: "1px solid transparent" }
+              : tokenCtx.sym === "@"
+              ? { fontSize: 11.5, fontWeight: 500, borderRadius: 20, padding: "3px 11px", cursor: "pointer", background: personColor(n) + "18", color: personColor(n), border: "1px solid " + personColor(n) + "44" }
+              : { fontSize: 11.5, fontWeight: 500, borderRadius: 7, padding: "3px 11px", cursor: "pointer", background: "transparent", color: th.muted, border: "1px solid " + th.borderStrong }
+          }, isRoute ? "\u2192 " + n : n);
+        }),
+        h("span", { style: { fontSize: 10.5, color: th.timestamp, marginLeft: "auto" } }, "Tab completes \u00B7 spaces need quotes: #\u201Cmulti word\u201D")
+      ),
+      /* confirmation after a routed / snoozed capture */
+      flashMsg && h("div", { style: { marginTop: 8, fontSize: 12, color: th.accent, display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 2px" } }, h(Icon, { name: "check", size: 12 }), flashMsg),
+      /* similar existing tasks — duplicate check while typing */
+      similarTasks.length > 0 && h("div", { style: { marginTop: 8, background: th.card, border: "1px solid " + (similarTasks[0].exact ? th.warnBorder : th.border), borderRadius: 12, padding: "10px 12px", boxShadow: th.shadow } },
+        h("div", { style: { fontSize: 10.5, fontWeight: 600, letterSpacing: 0.6, textTransform: "uppercase", color: similarTasks[0].exact ? th.warnText : th.faint, marginBottom: 6 } },
+          similarTasks[0].exact ? "Possible duplicate" : "Similar existing tasks"),
+        similarTasks.map(({ item: s, exact }) => h("div", {
+          key: s.id,
+          onClick: () => goToSimilar(s),
+          title: "Show this task",
+          style: { display: "flex", alignItems: "baseline", gap: 10, padding: "5px 6px", borderRadius: 8, cursor: "pointer", fontSize: 12.5 },
+          onMouseEnter: e => e.currentTarget.style.background = th.hover,
+          onMouseLeave: e => e.currentTarget.style.background = "transparent"
+        },
+          h("span", { style: { fontSize: 9.5, fontWeight: 700, letterSpacing: 0.7, textTransform: "uppercase", color: exact ? th.warnText : th.faint, flexShrink: 0, minWidth: 54 } }, taskHomeLabel(s)),
+          h("span", { style: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: s.done ? th.faint : th.text, textDecoration: s.done ? "line-through" : "none" } }, s.text),
+          s.tags.length > 0 && h("span", { style: { color: th.faint, fontSize: 11, flexShrink: 0 } }, s.tags.slice(0, 3).join(" \u00B7 ")),
+          h("span", { style: { color: th.timestamp, fontSize: 10.5, flexShrink: 0 } }, s.done && s.doneAt ? "done " + fmtDay(s.doneAt) : (s.createdAt ? fmtDay(s.createdAt) : ""))
+        ))
+      ),
+      view === "inbox" && h("p", { style: { fontSize: 11.5, color: th.faint, marginTop: 8, marginBottom: 14, lineHeight: 1.5 } },
+        "2-minute rule: if it takes less than two minutes, do it now. Clarify the rest into Next, Waiting or Someday — or snooze it.")
+    ),
+
+    /* ---------- Search ---------- */
+    view !== "areas" && h("div", { style: { position: "relative", marginBottom: 20 } },
+      h("span", { style: { position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", color: th.faint, pointerEvents: "none", display: "inline-flex" } }, h(Icon, { name: "search", size: 14 })),
+      h("input", {
+        value: search, onChange: e => setSearch(e.target.value), placeholder: (view === "done" || view === "doneToday") ? "Search completed tasks…" : view === "projects" ? "Search project tasks…" : "Search across all active lists — tasks, notes, tags, projects…",
+        style: { width: "100%", padding: "10px 36px", fontSize: 13.5, border: "1px solid " + th.border, borderRadius: 10, outline: "none", background: th.inputBg, color: th.text, boxSizing: "border-box" }
+      }),
+      search && h("span", { onClick: () => setSearch(""), style: { position: "absolute", right: 13, top: "50%", transform: "translateY(-50%)", color: th.faint, cursor: "pointer", fontSize: 14, fontWeight: 600 } }, "×")
+    ),
+
+    /* ---------- Postponed view banner (reached from the review) ---------- */
+    view === "postponed" && h("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", background: th.warnBg, border: "1px solid " + th.warnBorder, borderRadius: 12, padding: "10px 14px", marginBottom: 20, fontSize: 12.5, color: th.warnText, lineHeight: 1.5 } },
+      h("strong", null, "Often postponed"),
+      h("span", null, "Tasks you have snoozed " + POSTPONED_MANY + "+ times. Ask: reword it, move it to Someday, or delete it."),
+      h("button", { className: "ghost-btn", onClick: () => { setView("next"); setFilterTags([]); setSearch(""); }, style: { marginLeft: "auto", ...smallBtn, padding: "3px 10px", fontSize: 11.5, color: th.warnText, borderColor: th.warnBorder } }, "Back to Next")
+    ),
+
+    /* ---------- Person filter (set by clicking a @chip) ---------- */
+    filterPerson && h("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14, fontSize: 12.5, color: th.muted } },
+      h(Icon, { name: "person", size: 13 }),
+      "Showing tasks with ", h("strong", { style: { color: personColor(filterPerson) } }, filterPerson),
+      h("button", { className: "ghost-btn", onClick: () => setFilterPerson(null), style: { ...smallBtn, padding: "2px 10px", fontSize: 11.5, color: th.danger, borderColor: th.danger + "44" } }, "× clear")
+    ),
+
+    /* ---------- People view intro + quick person chips ---------- */
+    view === "people" && activePeople.length > 0 && !filterPerson && h("div", { style: { display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 20 } },
+      activePeople.map(p => h("button", {
+        key: p, className: "ghost-btn", onClick: () => setFilterPerson(p),
+        style: { fontSize: 11.5, fontWeight: 500, borderRadius: 20, padding: "4px 12px", cursor: "pointer", background: personColor(p) + "18", color: personColor(p), border: "1px solid " + personColor(p) + "44", display: "inline-flex", alignItems: "center", gap: 5 }
+      }, h(Icon, { name: "person", size: 11 }), p, " ", h("span", { style: { opacity: 0.6, fontSize: 10.5 } }, active.filter(i => hasPerson(i, p)).length)))
+    ),
+
+    /* ---------- Tag filter chips ---------- */
+    chipTags.length > 0 && h("div", { style: { display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 20 } },
+      chipTags.map(tag => h("button", {
+        key: tag, className: "ghost-btn",
+        onClick: () => setFilterTags(prev => toggleIn(prev, tag)),
+        style: {
+          fontSize: 11.5, fontWeight: 500, borderRadius: 20, padding: "4px 12px", cursor: "pointer",
+          background: filterTags.some(x => sameTag(x, tag)) ? tagColor(tag) : tagColor(tag) + "14",
+          color: filterTags.some(x => sameTag(x, tag)) ? "#fff" : tagColor(tag),
+          border: "1px solid " + (filterTags.some(x => sameTag(x, tag)) ? tagColor(tag) : "transparent")
+        }
+      }, tag, " ", h("span", { style: { opacity: 0.6, fontSize: 10.5 } }, viewTagCount(tag)))),
+      filterTags.length > 0 && h("button", {
+        className: "ghost-btn", onClick: () => setFilterTags([]),
+        style: { fontSize: 11.5, fontWeight: 500, borderRadius: 20, padding: "4px 12px", cursor: "pointer", background: "transparent", color: th.danger, border: "1px solid " + th.danger + "44" }
+      }, "× clear")
+    ),
+
+    /* ---------- Stats (quiet inline row) ---------- */
+    h("div", { style: { marginBottom: 20 } },
+      sectionToggle("Stats", showStats, setShowStats),
+      showStats && h("div", { style: { display: "flex", flexWrap: "wrap", gap: "10px 28px", marginTop: 10, padding: "14px 18px", background: th.card, border: "1px solid " + th.border, borderRadius: 12, fontSize: 12.5, color: th.muted } },
+        [
+          ["Created today", stats.createdToday],
+          ["Done today", stats.completedToday],
+          ["Done this week", stats.completedWeek],
+          ["In inbox", listCount("inbox")],
+          ["Active", stats.totalActive],
+          ["Archived", stats.totalDone],
+          ["Total", stats.total],
+          ["Projects w/o next action", projectsWithoutNext.length, projectsWithoutNext.length > 0]
+        ].map(([label, value, warn]) => h("span", { key: label, style: { display: "inline-flex", alignItems: "baseline", gap: 7 } },
+          h("span", { style: { fontSize: 16, fontWeight: 650, color: warn ? th.warnText : th.text } }, value),
+          h("span", null, label)))
+      )
+    ),
+
+    /* ---------- Brain dump ---------- */
+    h("div", { style: { marginBottom: 24 } },
+      sectionToggle("Brain dump", showBrainDump, setShowBrainDump,
+        brainDump.trim() && h("span", { style: { width: 6, height: 6, borderRadius: 3, background: th.accent, display: "inline-block" } })),
+      showBrainDump && h("textarea", {
+        value: brainDump, onChange: e => setBrainDump(e.target.value),
+        placeholder: "Park ideas and loose notes here — turn them into Inbox tasks during your review…",
+        rows: 6,
+        style: { width: "100%", marginTop: 10, padding: "12px 14px", fontSize: 13, border: "1px solid " + th.border, borderRadius: 12, outline: "none", background: th.inputBg, color: th.text, resize: "vertical", lineHeight: 1.6, boxSizing: "border-box" }
+      })
+    ),
+
+    /* ---------- Collapse all (grouped mode) ---------- */
+    groupingOn && groupNames.length > 0 && h("div", { style: { display: "flex", justifyContent: "flex-end", marginBottom: 10 } },
+      h("button", { className: "ghost-btn", onClick: toggleAllGroups, style: { background: "none", border: "none", cursor: "pointer", fontSize: 11.5, fontWeight: 500, color: th.muted } },
+        allCollapsed ? "Expand all" : "Collapse all")
+    ),
+
+    /* ---------- Areas view ---------- */
+    view === "areas" && h("div", null,
+      h("p", { style: { fontSize: 12.5, color: th.muted, lineHeight: 1.6, marginBottom: 18, maxWidth: 640 } },
+        "Areas are the standards you maintain \u2014 they never finish, they just need attention. Scan each one and ask: ",
+        h("em", null, "is anything slipping here?"),
+        " An area with nothing queued in Next isn\u2019t necessarily a problem \u2014 but it should be a conscious choice."),
+
+      areaTags.length === 0 && h("p", { style: { fontSize: 13, color: th.faint, margin: "24px 0" } },
+        "No areas yet. Mark some of your tags below as areas of responsibility \u2014 e.g. HR, Sales, a client, Home."),
+
+      areaTags.map(tag => {
+        const a = areaInfo(tag);
+        const pill = (label, count, viewKey) => h("button", {
+          key: label, className: "ghost-btn",
+          onClick: () => { if (count) { setView(viewKey); setFilterTags([tag]); setSearch(""); } },
+          title: count ? "Show " + label + " tasks in " + tag : "Nothing here",
+          style: { border: "1px solid " + th.border, background: "transparent", borderRadius: 8, padding: "5px 11px", fontSize: 12, cursor: count ? "pointer" : "default", color: count ? th.text : th.faint, display: "inline-flex", alignItems: "baseline", gap: 6 }
+        }, h("span", { style: { fontWeight: 650 } }, count), label);
+        return h("div", { key: tag, style: { background: th.card, border: "1px solid " + th.border, borderRadius: 14, padding: "16px 18px", marginBottom: 12, boxShadow: th.shadow } },
+          h("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 } },
+            h("span", { style: { width: 9, height: 9, borderRadius: 5, background: tagColor(tag), display: "inline-block" } }),
+            h("span", { style: { fontSize: 15, fontWeight: 650 } }, tag),
+            a.neglected && h("span", { style: { fontSize: 10.5, fontWeight: 600, color: th.warnText, background: th.warnBg, border: "1px solid " + th.warnBorder, borderRadius: 12, padding: "2px 10px" } }, "nothing queued in Next"),
+            h("span", { style: { marginLeft: "auto", fontSize: 11, color: th.faint } },
+              a.last ? "last activity " + (daysAgo(a.last) === 0 ? "today" : daysAgo(a.last) + " d ago") : "no activity yet")
+          ),
+          h("div", { style: { display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" } },
+            pill("next", a.next, "next"),
+            pill("waiting", a.waiting, "waiting"),
+            pill("someday", a.someday, "someday"),
+            pill("inbox", a.inbox, "inbox"),
+            pill("snoozed", a.snoozed, "snoozed"),
+            h("span", { style: { fontSize: 11.5, color: a.doneWeek ? th.green : th.faint, marginLeft: 4 } },
+              a.doneWeek, " done this week")
+          )
+        );
+      }),
+
+      /* rename / merge tags */
+      h("div", { style: { marginTop: 28 } },
+        h("div", { style: { fontSize: 11, fontWeight: 600, letterSpacing: 0.6, textTransform: "uppercase", color: th.faint, marginBottom: 4 } }, "Rename or merge tags"),
+        h("p", { style: { fontSize: 12, color: th.muted, marginBottom: 10, lineHeight: 1.5 } },
+          "Click a tag to rename it everywhere (archive included). Renaming onto a name that already exists merges the two — e.g. “work” → “Work”."),
+        h("div", { style: { display: "flex", flexWrap: "wrap", gap: 7 } },
+          allTags.map(tag => {
+            const total = items.filter(i => hasTag(i, tag)).length;
+            const act = items.filter(i => !i.done && hasTag(i, tag)).length;
+            return renamingTag === tag
+              ? h("span", { key: tag, style: { display: "inline-flex", alignItems: "center", gap: 4 } },
+                  h("span", { style: { fontSize: 11.5, color: tagColor(tag), fontWeight: 500 } }, tag, " →"),
+                  h(SuggestInput, { placeholder: "new name…", suggestionsPool: allTags, exclude: [tag], width: 140, th,
+                    onSubmit: to => { if (!sameTag(to, tag) || to !== tag) renameTag(tag, to); },
+                    onClose: () => setRenamingTag(null) }))
+              : h("button", {
+                  key: tag, className: "ghost-btn", onClick: () => setRenamingTag(tag),
+                  title: total + " tasks (" + act + " active)" + (isStaleTag(tag) ? " · retired from pickers" : "") + " — click to rename",
+                  style: { fontSize: 11.5, fontWeight: 500, borderRadius: 20, padding: "4px 12px", cursor: "pointer",
+                           background: tagColor(tag) + "14", color: tagColor(tag), border: "1px solid transparent", opacity: isStaleTag(tag) ? 0.55 : 1,
+                           display: "inline-flex", alignItems: "center", gap: 6 }
+                }, tag, h("span", { style: { opacity: 0.6, fontSize: 10.5 } }, total));
+          }))
+      ),
+
+      /* manage which tags are areas */
+      h("div", { style: { marginTop: 24 } },
+        h("div", { style: { fontSize: 11, fontWeight: 600, letterSpacing: 0.6, textTransform: "uppercase", color: th.faint, marginBottom: 10 } }, "Mark tags as areas"),
+        visibleTags.length === 0 && h("span", { style: { fontSize: 12.5, color: th.faint } }, "No tags yet \u2014 add tasks with #tags first."),
+        h("div", { style: { display: "flex", flexWrap: "wrap", gap: 7 } },
+          visibleTags.map(tag => {
+            const on = areaTags.some(x => sameTag(x, tag));
+            return h("button", {
+              key: tag, className: "ghost-btn", onClick: () => toggleArea(tag),
+              title: on ? "Remove from areas" : "Mark as an area of responsibility",
+              style: { fontSize: 11.5, fontWeight: 500, borderRadius: 20, padding: "4px 12px", cursor: "pointer",
+                       background: on ? tagColor(tag) : "transparent", color: on ? "#fff" : th.muted,
+                       border: "1px solid " + (on ? tagColor(tag) : th.border) }
+            }, on ? "\u2713 " : "", tag);
+          }))
+      )
+    ),
+
+    /* ---------- Task list ---------- */
+    Object.entries(grouped).map(([group, groupItems]) => {
+      if (!groupItems || !groupItems.length) return null;
+      const collapsed = collapsedGroups.has(group);
+      const isProjectGroup = view === "projects";
+      const isUpcomingGroup = view === "snoozed" && !groupByTag;
+      const projNoNext = isProjectGroup && projectsWithoutNext.includes(group);
+      return h("div", { key: group },
+        groupingOn && group && h("div", {
+          onClick: () => toggleGroup(group),
+          style: { display: "flex", alignItems: "center", gap: 8, fontSize: 12, fontWeight: 600, color: th.muted, letterSpacing: 0.4, marginBottom: 10, marginTop: 20, cursor: "pointer", userSelect: "none", flexWrap: "wrap" }
+        },
+          h("span", { style: { display: "inline-flex", transform: collapsed ? "none" : "rotate(90deg)", transition: "transform 0.15s", color: th.faint } }, h(Icon, { name: "chevR", size: 12 })),
+          h("span", { style: { color: isProjectGroup || isUpcomingGroup ? th.text : view === "people" ? personColor(group) : (group === "No tag" ? th.faint : tagColor(group)), fontSize: isProjectGroup || view === "people" || isUpcomingGroup ? 13.5 : 12, display: "inline-flex", alignItems: "center", gap: 6 } }, view === "people" && h(Icon, { name: "person", size: 13 }), isUpcomingGroup && h(Icon, { name: "clock", size: 13 }), group),
+          isUpcomingGroup && groupItems.length > 0 && h("span", { style: { color: th.faint, fontWeight: 450, fontSize: 11.5 } }, fmtDay(groupItems[0].snoozedUntil) + (groupItems.length > 1 && fmtDay(groupItems[groupItems.length - 1].snoozedUntil) !== fmtDay(groupItems[0].snoozedUntil) ? " \u2192 " + fmtDay(groupItems[groupItems.length - 1].snoozedUntil) : "")),
+          h("span", { style: { color: th.faint, fontWeight: 450 } }, groupItems.length),
+          projNoNext && h("span", { style: { fontSize: 10.5, fontWeight: 600, color: th.warnText, background: th.warnBg, border: "1px solid " + th.warnBorder, borderRadius: 12, padding: "2px 10px" } }, "no next action"),
+          view === "people" && h("button", {
+            className: "ghost-btn", onClick: e => { e.stopPropagation(); copyAgenda(group); },
+            title: "Copy a 1:1 agenda for " + group + " to the clipboard",
+            style: { ...smallBtn, padding: "3px 10px", fontSize: 11, marginLeft: 6, display: "inline-flex", alignItems: "center", gap: 5, color: copiedAgendaFor === group ? th.green : th.muted, borderColor: copiedAgendaFor === group ? th.green + "66" : th.border }
+          }, h(Icon, { name: copiedAgendaFor === group ? "check" : "copy", size: 11 }), copiedAgendaFor === group ? "Copied" : "Copy agenda")
+        ),
+        (!groupingOn || !group || !collapsed) && h("ul", { className: "task-columns", style: { listStyle: "none", padding: 0, margin: 0 } },
+          groupItems.map(item => ItemRow({ item, showProjectBadge: view !== "projects", showStatusLabel: view === "projects" || view === "people" || view === "postponed" || globalSearch }))
+        )
+      );
+    }),
+
+    /* ---------- Empty state ---------- */
+    view !== "areas" && visible.length === 0 && h("p", { style: { color: th.faint, textAlign: "center", marginTop: 56, marginBottom: 40, fontSize: 13.5, lineHeight: 1.7 } },
+      search.trim() ? "No matches for “" + search.trim() + "”."
+      : filterTags.length ? "Nothing matches the selected tags."
+      : view === "inbox" ? "Inbox zero. Mind like water."
+      : view === "next" ? "No next actions. Clarify your inbox, or activate something from Someday."
+      : view === "waiting" ? "Not waiting on anything."
+      : view === "someday" ? "The Someday / Maybe list is empty."
+      : view === "projects" ? "No projects yet. Add a task with \"+ProjectName\", or attach a project on a task card."
+      : view === "people" ? "Nobody here yet. Mention someone with \"@name\" in a task, or add a person on a task card."
+      : view === "snoozed" ? "Nothing snoozed."
+      : view === "postponed" ? "Nothing has been postponed " + POSTPONED_MANY + " times or more. Nice."
+      : view === "doneToday" ? "Nothing completed today — yet."
+      : "The archive is empty."
+    ),
+
+    /* ---------- Import / Export ---------- */
+    h("div", { style: { display: "flex", justifyContent: "center", gap: 10, marginTop: 40, flexWrap: "wrap" } },
+      h("button", { className: "ghost-btn", onClick: exportJSON, style: { ...smallBtn, display: "inline-flex", alignItems: "center", gap: 7, padding: "8px 16px" } },
+        h(Icon, { name: "download", size: 13 }), "Export JSON"),
+      h("button", { className: "ghost-btn", onClick: () => fileRef.current?.click(), style: { ...smallBtn, display: "inline-flex", alignItems: "center", gap: 7, padding: "8px 16px" } },
+        h(Icon, { name: "upload", size: 13 }), "Import JSON"),
+      h("input", { ref: fileRef, type: "file", accept: ".json", onChange: importJSON, style: { display: "none" } })
+    ),
+
+    /* ---------- Footer ---------- */
+    h("p", { style: { color: th.timestamp, fontSize: 11, textAlign: "center", marginTop: 16, lineHeight: 1.7 } },
+      "Double-click a task to edit · #tag, +project, @person and quoted #\u201Cmulti word\u201D forms work in the capture bar · #w8 sends a task straight to Waiting, #next / #someday likewise · ^3d, ^2w or ^2026-10-01 snoozes it on capture · every change is saved automatically")
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(h(Todo));
+  </script>
+</body>
+</html>
