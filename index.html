@@ -2,8 +2,16 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>todo — getting things done</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' rx='40' fill='%235E6AD2'/%3E%3Cpath d='M48 92l30 30 56-60' fill='none' stroke='%23fff' stroke-width='18' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='146' cy='138' r='10' fill='%23fff'/%3E%3C/svg%3E" />
+  <link rel="apple-touch-icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAALQAAAC0CAYAAAA9zQYyAAAD5klEQVR42u3dQY7TQBCGUXdrrkOOBHs4D9mTI8GBYIWEhDKaJHa76+/3LZEGDfZLUR5s07ZJ+vz15+9NZbtdL22G76MBrCTgDWIl4W4QKwl3A1lJsBvISoLdYdaZ7W2mgaykad1hVtK07jArCXUDWUkrSIdZSdO6w6wk1B1mJaHuDpeS6nt/QqQzp3SHWUmoO8xKQm2H1ho7tOmsilO6w6wk1FYOZa8cprMqT2kTWrkT2nRW9SltQit7h5YiQFs3lLB2mNCyckhTg7ZuKGXtMKFl5ZCAlgbU7M8yoSWgJaAloAW0BLQEtAS0BLSAloCWgJaAloAW0BLQEtAS0NK93hwC/duP75/++7Uv336V+f49U6i7kCvCBhrkh79mZth2aJiHfR3QEtAaMWVnndJAw2xCC+ZZPxhAw2xCC2agBTPQghloDWrGfzEE2nQ2oQXzrPdzAA2zCa21Mc98t50b/GGOgGxCwxyHGWiYozADDXMUZqBhjsIMNMxRmIGGOS6gYY6ZzkDDHIUZaJijMAOtKMxAm85RmIGGOQrzthW+Oan6WzJhPqZyL2tMeUsmzIuDTntLJswL79CJb8mE2UWhC0CY64NOfUsmzCZ0LGqYFwGd/qZMmE3oKNRuAwU6BpGbjYCOQQ0z0DGoYV4Y9NEnJnGHXRnz0hP6DNR+ogH0kJM0AjXMQMdMapiBPuWEHQEPZqDvnrhq6wfMQMfs1DADHYMaZqBjUMMMdAxqmIGOQQ0z0DGo3QYKdAxqNxsBHYMa5vkq96KZGS7Okj6gJjQI/gxAAwEz0EvCgBnoGCAwAx0DBWagY8DADHQMHJiBjgEEM9AxkGAGOgYUzEDHwIIZaMAE9IyofXiAjkENM9AxqGEGOgY1zEDHoIYZ6BjUMJ/Tm0OgZ3vvUbezPtCRzxSOOmmrTudHjsnoYwH0jidxhTVj9g840Duc0FX25Veeph91jIDW4ZhHovZTDg3BvOfvA7SWCWgNnapHT2mgZUJLQEtAS0ALaAloLVC1Bx6AlgktU3rG6Qy0hmEcdbddv10vzenSkShHYb5dL82E1qE4R98r7plCPY16xmcKgdb0e/HDF4X2aFXvr2E7tKICWpmgrR2qvm6Y0LJySGVAWztUed0woZW/cpjSqjqdTWitcVFoSqvidH53QkOtapitHFpj5TClVXE6f2hCQ60qmD+8ckCtCpjt0FprhzalVWk6PzyhodbMmJ9aOaDWrJi3bdtewul/0NIskHe5KDStNRPml0FDrZkwv7xyWEE0C+TdJrRprZnMHAbQtNYZw+/wiQq2Rv4tPnRFgBvioztt54Ub4ijQgAN8RH8AvnMSTLZIU5gAAAAASUVORK5CYII=" />
+  <link rel="manifest" href="data:application/manifest+json,%7B%22name%22%3A%22todo%22%2C%22short_name%22%3A%22todo%22%2C%22display%22%3A%22standalone%22%2C%22start_url%22%3A%22.%22%2C%22background_color%22%3A%22%23F7F7F5%22%2C%22theme_color%22%3A%22%235E6AD2%22%2C%22icons%22%3A%5B%7B%22src%22%3A%22data%3Aimage%2Fpng%3Bbase64%2CiVBORw0KGgoAAAANSUhEUgAAALQAAAC0CAYAAAA9zQYyAAAD5klEQVR42u3dQY7TQBCGUXdrrkOOBHs4D9mTI8GBYIWEhDKaJHa76%2B%2F3LZEGDfZLUR5s07ZJ%2Bvz15%2B9NZbtdL22G76MBrCTgDWIl4W4QKwl3A1lJsBvISoLdYdaZ7W2mgaykad1hVtK07jArCXUDWUkrSIdZSdO6w6wk1B1mJaHuDpeS6nt%2FQqQzp3SHWUmoO8xKQm2H1ho7tOmsilO6w6wk1FYOZa8cprMqT2kTWrkT2nRW9SltQit7h5YiQFs3lLB2mNCyckhTg7ZuKGXtMKFl5ZCAlgbU7M8yoSWgJaAloAW0BLQEtAS0BLSAloCWgJaAloAW0BLQEtAS0NK93hwC%2FduP75%2F%2B%2B7Uv336V%2Bf49U6i7kCvCBhrkh79mZth2aJiHfR3QEtAaMWVnndJAw2xCC%2BZZPxhAw2xCC2agBTPQghloDWrGfzEE2nQ2oQXzrPdzAA2zCa21Mc98t50b%2FGGOgGxCwxyHGWiYozADDXMUZqBhjsIMNMxRmIGGOS6gYY6ZzkDDHIUZaJijMAOtKMxAm85RmIGGOQrzthW%2BOan6WzJhPqZyL2tMeUsmzIuDTntLJswL79CJb8mE2UWhC0CY64NOfUsmzCZ0LGqYFwGd%2FqZMmE3oKNRuAwU6BpGbjYCOQQ0z0DGoYV4Y9NEnJnGHXRnz0hP6DNR%2BogH0kJM0AjXMQMdMapiBPuWEHQEPZqDvnrhq6wfMQMfs1DADHYMaZqBjUMMMdAxqmIGOQQ0z0DGo3QYKdAxqNxsBHYMa5vkq96KZGS7Okj6gJjQI%2FgxAAwEz0EvCgBnoGCAwAx0DBWagY8DADHQMHJiBjgEEM9AxkGAGOgYUzEDHwIIZaMAE9IyofXiAjkENM9AxqGEGOgY1zEDHoIYZ6BjUMJ%2FTm0OgZ3vvUbezPtCRzxSOOmmrTudHjsnoYwH0jidxhTVj9g840Duc0FX25Veeph91jIDW4ZhHovZTDg3BvOfvA7SWCWgNnapHT2mgZUJLQEtAS0ALaAloLVC1Bx6AlgktU3rG6Qy0hmEcdbddv10vzenSkShHYb5dL82E1qE4R98r7plCPY16xmcKgdb0e%2FHDF4X2aFXvr2E7tKICWpmgrR2qvm6Y0LJySGVAWztUed0woZW%2FcpjSqjqdTWitcVFoSqvidH53QkOtapitHFpj5TClVXE6f2hCQ60qmD%2B8ckCtCpjt0FprhzalVWk6PzyhodbMmJ9aOaDWrJi3bdtewul%2F0NIskHe5KDStNRPml0FDrZkwv7xyWEE0C%2BTdJrRprZnMHAbQtNYZw%2B%2FwiQq2Rv4tPnRFgBvioztt54Ub4ijQgAN8RH8AvnMSTLZIU5gAAAAASUVORK5CYII%3D%22%2C%22sizes%22%3A%22180x180%22%2C%22type%22%3A%22image%2Fpng%22%7D%5D%7D" />
+  <meta name="theme-color" content="#5E6AD2" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="todo" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -20,11 +28,45 @@
     @media (min-width: 1440px) { .task-columns { column-count: 3; } }
     .card-toolbar { opacity: 0; pointer-events: none; transition: opacity 0.15s; }
     li:hover .card-toolbar, li:focus-within .card-toolbar { opacity: 1; pointer-events: auto; }
-    @media (hover: none) { .card-toolbar { position: static !important; opacity: 1; pointer-events: auto; background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; } }
+    /* touch devices without hover (tablets): toolbar always visible, on its own row under the title */
+    @media (hover: none) { .card-title-row { flex-wrap: wrap; } .card-toolbar { position: static !important; opacity: 1; pointer-events: auto; order: 2; flex-basis: 100%; width: 100%; margin-top: 6px; background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; } }
     .icon-btn { background: none; border: none; cursor: pointer; padding: 4px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; transition: background 0.12s, color 0.12s; }
     .ghost-btn { background: none; cursor: pointer; border-radius: 8px; font-size: 12.5px; font-weight: 500; transition: all 0.15s; }
     button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid #5E6AD2; outline-offset: 1px; }
     @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+    /* ---------- phone layout (desktop untouched) ----------
+       Inline styles carry the desktop design; these overrides win with
+       !important so the phone gets: one column, sticky scrollable tabs,
+       icon-only header, a "…" menu instead of a permanent toolbar row,
+       tighter cards, and 16px inputs so iOS does not zoom on focus. */
+    @media (max-width: 640px) {
+      .app-root { padding: 14px 12px 48px !important; }
+      .app-header { margin-bottom: 14px !important; gap: 8px !important; }
+      .app-tagline { display: none !important; }
+      .btn-label { display: none !important; }
+      .hdr-btn { padding: 7px 9px !important; }
+      .view-tabs { flex-wrap: nowrap !important; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+                   margin: 0 -12px 14px !important; padding: 0 12px !important; position: sticky; top: 0; z-index: 5; }
+      .view-tabs::-webkit-scrollbar { display: none; }
+      .view-tabs > button { white-space: nowrap; padding: 10px 11px !important; font-size: 13px !important; }
+      .capture-input, .search-input { font-size: 16px !important; }
+      .add-btn { padding: 9px 13px !important; font-size: 13px !important; }
+      .chip-row { flex-wrap: nowrap !important; overflow-x: auto; scrollbar-width: none; margin: 0 -12px 14px !important; padding: 0 12px !important; }
+      .chip-row::-webkit-scrollbar { display: none; }
+      .chip-row > button { white-space: nowrap; flex-shrink: 0; }
+      .task-card { padding: 11px 12px !important; margin-bottom: 8px !important; border-radius: 10px !important; }
+      .card-stamps { display: none !important; }
+      .card-title { padding-right: 28px; }
+      .card-more { display: inline-flex !important; }
+      .card-toolbar { position: static !important; opacity: 1 !important; pointer-events: auto !important; order: 2; flex-basis: 100%; width: 100%;
+                      justify-content: flex-start; gap: 2px !important; margin-top: 8px; padding: 2px !important; box-shadow: none !important; }
+      .card-toolbar .icon-btn { padding: 8px !important; }
+      .card-title-row { flex-wrap: wrap; }
+      .task-columns { column-count: 1 !important; }
+      .section-card { padding: 14px 14px !important; }
+    }
+    .card-more { display: none; }
   </style>
 </head>
 <body>
@@ -523,6 +565,7 @@ const Icon = ({ name, size = 15 }) => {
     /* check + small clock: "complete, then wait" */
     checkWait: [P("M3 12 7.5 16.5 14 8"), h("circle", { key: "c", cx: 17.5, cy: 17, r: 4.5 }), P("M17.5 14.8V17l1.6 1.1")],
     person: [h("circle", { key: "c", cx: 12, cy: 8, r: 4 }), P("M4 21a8 8 0 0 1 16 0")],
+    more: [h("circle", { key: "1", cx: 5, cy: 12, r: 1.6, fill: "currentColor", stroke: "none" }), h("circle", { key: "2", cx: 12, cy: 12, r: 1.6, fill: "currentColor", stroke: "none" }), h("circle", { key: "3", cx: 19, cy: 12, r: 1.6, fill: "currentColor", stroke: "none" })],
     cloud: [P("M17.5 19a4.5 4.5 0 0 0 .4-9A7 7 0 0 0 4.3 12.5 3.5 3.5 0 0 0 6.5 19z")],
     lock: [h("rect", { key: "r", x: 4, y: 11, width: 16, height: 10, rx: 2 }), P("M8 11V7a4 4 0 0 1 8 0v4")]
   };
@@ -555,7 +598,22 @@ function SuggestInput({ placeholder, suggestionsPool, exclude, onSubmit, onClose
   );
 }
 
+/* phone or not — drives the "…" card menu; everything else is CSS */
+const useMedia = query => {
+  const get = () => { try { return window.matchMedia(query).matches; } catch (e) { return false; } };
+  const [m, setM] = React.useState(get);
+  React.useEffect(() => {
+    let mq; try { mq = window.matchMedia(query); } catch (e) { return; }
+    const on = () => setM(mq.matches);
+    mq.addEventListener ? mq.addEventListener("change", on) : mq.addListener(on);
+    return () => { mq.removeEventListener ? mq.removeEventListener("change", on) : mq.removeListener(on); };
+  }, [query]);
+  return m;
+};
+
 function Todo() {
+  const isMobile = useMedia("(max-width: 640px)");
+  const [toolsFor, setToolsFor] = React.useState(null); /* phone: which card shows its toolbar */
   const [items, setItems] = React.useState(loadItems);
   const [input, setInput] = React.useState("");
   const [editId, setEditId] = React.useState(null);
@@ -1119,7 +1177,7 @@ function Todo() {
 
   /* ---------------- single task card ---------------- */
   const ItemRow = ({ item, showProjectBadge, showStatusLabel }) => h("li", {
-    key: item.id,
+    key: item.id, className: "task-card",
     style: {
       background: item.done ? th.cardDone : th.card, borderRadius: 12,
       border: "1px solid " + th.border, marginBottom: compact ? 8 : 12,
@@ -1136,8 +1194,8 @@ function Todo() {
       h("div", { style: { flex: 1, minWidth: 0 } },
 
         /* title row + toolbar */
-        h("div", { style: { display: "flex", alignItems: "flex-start", gap: 8 } },
-          h("div", { style: { flex: 1, minWidth: 0 } },
+        h("div", { className: "card-title-row", style: { display: "flex", alignItems: "flex-start", gap: 8 } },
+          h("div", { className: "card-title", style: { flex: 1, minWidth: 0 } },
             editId === item.id
               ? h("textarea", {
                   autoFocus: true, value: editText, rows: 1,
@@ -1155,8 +1213,13 @@ function Todo() {
                 showStatusLabel && !item.done && h("span", { style: { fontSize: 10, fontWeight: 600, letterSpacing: 0.8, textTransform: "uppercase", color: th.faint, marginRight: 8, verticalAlign: "1px" } }, taskHomeLabel(item)),
                 item.text)
           ),
-          /* toolbar — appears on hover, hidden while editing to give the editor full width */
-          editId !== item.id && h("div", { className: "card-toolbar", style: { display: "flex", gap: 1, flexShrink: 0, position: "absolute", top: compact ? 5 : 9, right: 8, background: item.done ? th.cardDone : th.card, border: "1px solid " + th.border, borderRadius: 9, padding: "2px 4px", boxShadow: th.shadow, zIndex: 2 } },
+          /* phone: "…" opens the toolbar as its own row under the title */
+          isMobile && editId !== item.id && h("button", {
+            className: "icon-btn card-more", onClick: () => setToolsFor(toolsFor === item.id ? null : item.id), title: "Actions",
+            style: { position: "absolute", top: 6, right: 6, color: toolsFor === item.id ? th.accent : th.faint, padding: 8 }
+          }, h(Icon, { name: "more", size: 16 })),
+          /* toolbar — appears on hover (desktop) or via "…" (phone), hidden while editing */
+          editId !== item.id && (!isMobile || toolsFor === item.id) && h("div", { className: "card-toolbar", style: { display: "flex", gap: 1, flexShrink: 0, position: "absolute", top: compact ? 5 : 9, right: 8, background: item.done ? th.cardDone : th.card, border: "1px solid " + th.border, borderRadius: 9, padding: "2px 4px", boxShadow: th.shadow, zIndex: 2 } },
             !item.done && item.status !== "inbox" && iconBtn({ onClick: () => setMoveMenuFor(moveMenuFor === item.id ? null : item.id), title: "Move to another list", key: "mv" }, "move"),
             !item.done && iconBtn({ onClick: () => setSnoozeMenuFor(snoozeMenuFor === item.id ? null : item.id), title: "Snooze", key: "sn" }, "clock"),
             !item.done && iconBtn({ onClick: () => completeAndWait(item.id), title: "Complete, then wait — marks this done and creates a follow-up in Waiting (same project, tags, people)", key: "cw", style: { color: th.green } }, "checkWait"),
@@ -1330,7 +1393,7 @@ function Todo() {
           )
         ),
 
-        !compact && (item.createdAt || item.modifiedAt || item.doneAt) && h("div", { style: { display: "flex", gap: 14, marginTop: 8, fontSize: 10.5, color: th.timestamp, flexWrap: "wrap" } },
+        !compact && (item.createdAt || item.modifiedAt || item.doneAt) && h("div", { className: "card-stamps", style: { display: "flex", gap: 14, marginTop: 8, fontSize: 10.5, color: th.timestamp, flexWrap: "wrap" } },
           item.createdAt && h("span", { title: "Created" }, "created ", fmtDate(item.createdAt)),
           item.modifiedAt && h("span", { title: "Modified" }, "edited ", fmtDate(item.modifiedAt)),
           item.doneAt && h("span", { title: "Completed", style: { color: th.green } }, "done ", fmtDate(item.doneAt))
@@ -1426,13 +1489,13 @@ function Todo() {
     style: { display: "flex", alignItems: "center", gap: 7, background: "none", border: "none", padding: "4px 0", fontSize: 12, fontWeight: 600, letterSpacing: 0.6, textTransform: "uppercase", color: th.faint, cursor: "pointer" }
   }, h("span", { style: { transform: open ? "rotate(90deg)" : "none", display: "inline-flex", transition: "transform 0.15s" } }, h(Icon, { name: "chevR", size: 12 })), label, extra);
 
-  return h("div", { style: { maxWidth: 1120, margin: "0 auto", padding: "40px 24px 64px", color: th.text } },
+  return h("div", { className: "app-root", style: { maxWidth: 1120, margin: "0 auto", padding: "40px 24px 64px", color: th.text } },
 
     /* ---------- Header ---------- */
-    h("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 28, flexWrap: "wrap", gap: 12 } },
+    h("div", { className: "app-header", style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 28, flexWrap: "wrap", gap: 12 } },
       h("div", { style: { display: "flex", alignItems: "baseline", gap: 12 } },
         h("h1", { style: { fontSize: 24, fontWeight: 700, letterSpacing: -0.5 } }, "todo", h("span", { style: { color: th.accent } }, ".")),
-        h("span", { style: { fontSize: 10.5, fontWeight: 600, color: th.faint, letterSpacing: 2, textTransform: "uppercase" } }, "Getting things done")
+        h("span", { className: "app-tagline", style: { fontSize: 10.5, fontWeight: 600, color: th.faint, letterSpacing: 2, textTransform: "uppercase" } }, "Getting things done")
       ),
       h("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } },
         saved === "ok" && !storageBroken && fileState !== "on" && h("span", { style: { fontSize: 11.5, color: th.green, display: "inline-flex", alignItems: "center", gap: 4 } }, h(Icon, { name: "check", size: 12 }), "saved"),
@@ -1444,14 +1507,14 @@ function Todo() {
         syncUI.status === "error" && h("span", { style: { fontSize: 11.5, color: th.danger, fontWeight: 600, cursor: "pointer" }, onClick: () => setShowSync(true), title: syncUI.msg }, "sync error"),
         syncUI.status === "syncing" && h("span", { style: { fontSize: 11.5, color: th.muted } }, "syncing…"),
         syncUI.status === "idle" && syncUI.lastAt && h("span", { style: { fontSize: 11.5, color: th.green, display: "inline-flex", alignItems: "center", gap: 4 }, title: "Last sync " + fmtDate(syncUI.lastAt) + (syncCfg && syncCfg.pass ? " · encrypted" : "") }, h(Icon, { name: syncCfg && syncCfg.pass ? "lock" : "cloud", size: 12 }), "synced"),
-        h("button", { className: "ghost-btn", onClick: () => setShowSync(!showSync), style: ghost(showSync || !!syncCfg), title: syncCfg ? "Sync settings" : "Set up sync via a GitHub gist" },
-          h(Icon, { name: "cloud", size: 13 }), "Sync"),
-        h("button", { className: "ghost-btn", onClick: () => setShowReview(!showReview), style: ghost(showReview), title: "Weekly review" },
-          h(Icon, { name: "refresh", size: 13 }), "Review"),
-        view !== "projects" && view !== "people" && view !== "areas" && h("button", { className: "ghost-btn", onClick: () => setGroupByTag(!groupByTag), style: ghost(groupByTag), title: "Group by tag" },
-          h(Icon, { name: "tag", size: 13 }), "Group"),
-        h("button", { className: "ghost-btn", onClick: () => setCompact(!compact), style: ghost(compact), title: compact ? "Comfortable view" : "Compact view" },
-          h(Icon, { name: compact ? "grid" : "rows", size: 13 }), compact ? "Cozy" : "Compact"),
+        h("button", { className: "ghost-btn hdr-btn", onClick: () => setShowSync(!showSync), style: ghost(showSync || !!syncCfg), title: syncCfg ? "Sync settings" : "Set up sync via a GitHub gist" },
+          h(Icon, { name: "cloud", size: 13 }), h("span", { className: "btn-label" }, "Sync")),
+        h("button", { className: "ghost-btn hdr-btn", onClick: () => setShowReview(!showReview), style: ghost(showReview), title: "Weekly review" },
+          h(Icon, { name: "refresh", size: 13 }), h("span", { className: "btn-label" }, "Review")),
+        view !== "projects" && view !== "people" && view !== "areas" && h("button", { className: "ghost-btn hdr-btn", onClick: () => setGroupByTag(!groupByTag), style: ghost(groupByTag), title: "Group by tag" },
+          h(Icon, { name: "tag", size: 13 }), h("span", { className: "btn-label" }, "Group")),
+        h("button", { className: "ghost-btn hdr-btn", onClick: () => setCompact(!compact), style: ghost(compact), title: compact ? "Comfortable view" : "Compact view" },
+          h(Icon, { name: compact ? "grid" : "rows", size: 13 }), h("span", { className: "btn-label" }, compact ? "Cozy" : "Compact")),
         h("button", { className: "icon-btn", onClick: () => setDark(!dark), title: dark ? "Light mode" : "Dark mode",
           style: { color: th.muted, border: "1px solid " + th.border, borderRadius: 8, padding: 7 },
           onMouseEnter: e => e.currentTarget.style.background = th.hover,
@@ -1565,7 +1628,7 @@ function Todo() {
     ),
 
     /* ---------- View tabs ---------- */
-    h("div", { style: { display: "flex", flexWrap: "wrap", gap: 2, marginBottom: 24, borderBottom: "1px solid " + th.border, paddingBottom: 0 } },
+    h("div", { className: "view-tabs", style: { display: "flex", flexWrap: "wrap", gap: 2, marginBottom: 24, borderBottom: "1px solid " + th.border, paddingBottom: 0, background: th.bg } },
       viewTabs.map(v => h("button", {
         key: v.key, className: "ghost-btn",
         onClick: () => { setView(v.key); setFilterTags([]); setFilterPerson(null); setSearch(""); },
@@ -1591,10 +1654,10 @@ function Todo() {
             else if (e.key === "Enter" && tokenCtx && tokenCtx.partial === "") { e.preventDefault(); completeToken(tokenCtx.suggestions[0]); }
             else if (e.key === "Enter") add();
           },
-          placeholder: addPlaceholder, autoFocus: true,
+          placeholder: addPlaceholder, autoFocus: !isMobile, className: "capture-input",
           style: { flex: 1, padding: "9px 4px", fontSize: 14, border: "none", outline: "none", background: "transparent", color: th.text }
         }),
-        h("button", { onClick: add, style: primaryBtn }, "Add")
+        h("button", { onClick: add, className: "add-btn", style: primaryBtn }, "Add")
       ),
       /* tag / project suggestions for the token being typed */
       tokenCtx && h("div", { style: { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginTop: 8, padding: "8px 12px", background: th.card, border: "1px solid " + th.border, borderRadius: 12, boxShadow: th.shadow } },
@@ -1645,7 +1708,7 @@ function Todo() {
     view !== "areas" && h("div", { style: { position: "relative", marginBottom: 20 } },
       h("span", { style: { position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", color: th.faint, pointerEvents: "none", display: "inline-flex" } }, h(Icon, { name: "search", size: 14 })),
       h("input", {
-        value: search, onChange: e => setSearch(e.target.value), placeholder: (view === "done" || view === "doneToday") ? "Search completed tasks…" : view === "projects" ? "Search project tasks…" : "Search across all active lists — tasks, notes, tags, projects…",
+        className: "search-input", value: search, onChange: e => setSearch(e.target.value), placeholder: (view === "done" || view === "doneToday") ? "Search completed tasks…" : view === "projects" ? "Search project tasks…" : "Search across all active lists — tasks, notes, tags, projects…",
         style: { width: "100%", padding: "10px 36px", fontSize: 13.5, border: "1px solid " + th.border, borderRadius: 10, outline: "none", background: th.inputBg, color: th.text, boxSizing: "border-box" }
       }),
       search && h("span", { onClick: () => setSearch(""), style: { position: "absolute", right: 13, top: "50%", transform: "translateY(-50%)", color: th.faint, cursor: "pointer", fontSize: 14, fontWeight: 600 } }, "×")
@@ -1666,7 +1729,7 @@ function Todo() {
     ),
 
     /* ---------- People view intro + quick person chips ---------- */
-    view === "people" && activePeople.length > 0 && !filterPerson && h("div", { style: { display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 20 } },
+    view === "people" && activePeople.length > 0 && !filterPerson && h("div", { className: "chip-row", style: { display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 20 } },
       activePeople.map(p => h("button", {
         key: p, className: "ghost-btn", onClick: () => setFilterPerson(p),
         style: { fontSize: 11.5, fontWeight: 500, borderRadius: 20, padding: "4px 12px", cursor: "pointer", background: personColor(p) + "18", color: personColor(p), border: "1px solid " + personColor(p) + "44", display: "inline-flex", alignItems: "center", gap: 5 }
@@ -1674,7 +1737,7 @@ function Todo() {
     ),
 
     /* ---------- Tag filter chips ---------- */
-    chipTags.length > 0 && h("div", { style: { display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 20 } },
+    chipTags.length > 0 && h("div", { className: "chip-row", style: { display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 20 } },
       chipTags.map(tag => h("button", {
         key: tag, className: "ghost-btn",
         onClick: () => setFilterTags(prev => toggleIn(prev, tag)),
